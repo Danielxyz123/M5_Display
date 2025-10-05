@@ -1,0 +1,5 @@
+{
+    "cmake.sourceDirectory": "C:/Users/danie/OneDrive/Dokumente/PlatformIO/Projects/M5_Test/.pio/libdeps/m5stack-core-esp32/M5GFX",
+    "cmake.configureOnOpen": false,
+    "idf.portWin": "COM10"
+}
