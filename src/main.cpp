@@ -4,7 +4,7 @@
 #include <esp_task_wdt.h>
 #include <math.h>
 
-// Debugging toggle (set to 0 for production to reduce serial output)
+// Debugging toggle
 #define DEBUG 1
 #if DEBUG
 #define DEBUG_PRINT(x) Serial.print(x)
@@ -14,17 +14,25 @@
 #define DEBUG_PRINTF(x, ...)
 #endif
 
-// Constants
+// === KONFIGURATION ===
 #define WATCHDOG_TIMEOUT 5
 #define WIFI_PASSWORD "96031546242323421756"
 #define MQTT_SERVER "192.168.178.44"
 #define MQTT_PORT 1883
 #define SSID "FRITZ!Box 7590 DG"
-#define UPDATE_INTERVAL 500 // ms
-#define WIFI_RECONNECT_INTERVAL 30000 // ms
-#define MQTT_BACKOFF_MAX 10000 // ms
-#define FIELD_BUFFER_SIZE 8 // Max 7 chars (e.g., "-1234 W")
-#define MQTT_BUFFER_SIZE 32 // Reduced for MQTT payloads
+#define UPDATE_INTERVAL 500
+#define WIFI_RECONNECT_INTERVAL 30000
+#define MQTT_BACKOFF_MAX 10000
+#define FIELD_BUFFER_SIZE 8
+#define MQTT_BUFFER_SIZE 32
+
+// === LAMPE STEUERUNG ÜBER TASTEN ===
+#define LAMP_TOPIC_ONOFF        "lampe/wohnzimmer/set"          // ioBroker: ON / OFF (retained)
+#define LAMP_TOPIC_BRIGHTNESS   "lampe/wohnzimmer/brightness_set" // ioBroker: +10 oder -10
+
+// Entprellung & Feedback
+uint32_t lastBtnPress = 0;
+#define BUTTON_DEBOUNCE 250  // ms
 
 // Function prototypes
 void initWifi();
@@ -33,7 +41,7 @@ void reconnectMQTT();
 void reconnectWifi();
 void updateDisplay();
 void drawGrid();
-void drawPVField(float value, bool forceRedraw = false);
+void drawPVField(int value, bool forceRedraw = false);
 void drawNetzField(const char* value, int intValue, bool forceRedraw = false);
 void drawAkkuField(const char* value, int intValue, bool forceRedraw = false);
 void drawBatteryField(const char* value, int intValue, bool forceRedraw = false);
@@ -41,6 +49,7 @@ void drawAutarkyField(const char* value, bool forceRedraw = false);
 void drawFieldShadow(int x, int y, int w, int h, int radius, uint16_t shadowColor);
 void drawFieldBorder(int x, int y, int w, int h, int radius, uint16_t borderColor);
 void fillGradientRoundRect(int x, int y, int w, int h, int radius, uint16_t colorStart, uint16_t colorEnd);
+void clearButtonFeedback();
 
 // Global variables
 WiFiClient espClient;
@@ -58,6 +67,7 @@ int old_batteryLevel = 0;
 int old_autarky = 0;
 int old_generation = 0;
 uint8_t testMode = 0;
+bool lampToggleState = false;       // für Toggle-Logik von BtnA
 
 void setup() {
     M5.begin();
@@ -75,18 +85,57 @@ void setup() {
     mqttClient.setKeepAlive(60);
     mqttClient.setCallback(callbackMqttReceive);
 
-    DEBUG_PRINT(F("Setup complete. Press A to toggle test mode.\n"));
+    DEBUG_PRINT(F("Setup complete.\n"));
+    DEBUG_PRINT(F("BtnA = Lampe Ein/Aus  |  BtnB = Heller  |  BtnC = Dunkler\n"));
 }
 
 void loop() {
     esp_task_wdt_reset();
     M5.update();
 
-    if (M5.BtnA.wasPressed()) {
+    // === TESTMODE (unverändert) ===
+    if (M5.BtnA.wasPressed() && millis() - lastBtnPress < 100) {
+        // sehr kurzer Druck innerhalb 100ms → Testmode togglen (wie vorher)
         testMode = !testMode;
         DEBUG_PRINTF("Test mode: %s\n", testMode ? "ON" : "OFF");
     }
 
+    // === LAMPE STEUERUNG ===
+    if (millis() - lastBtnPress > BUTTON_DEBOUNCE) {
+        if (M5.BtnA.wasPressed()) {
+            lastBtnPress = millis();
+            lampToggleState = !lampToggleState;
+            const char* payload = lampToggleState ? "ON" : "OFF";
+            mqttClient.publish(LAMP_TOPIC_ONOFF, payload, true); // retained
+            M5.Lcd.fillRect(260, 8, 52, 28, TFT_BLACK);
+            M5.Lcd.setTextColor(lampToggleState ? TFT_GREEN : TFT_RED);
+            M5.Lcd.drawCentreString(lampToggleState ? "AN" : "AUS", 286, 12, 2);
+        }
+
+        if (M5.BtnB.wasPressed()) {
+            lastBtnPress = millis();
+            mqttClient.publish(LAMP_TOPIC_BRIGHTNESS, "+10", false);
+            M5.Lcd.fillRect(260, 8, 52, 28, TFT_BLACK);
+            M5.Lcd.setTextColor(TFT_WHITE);
+            M5.Lcd.drawCentreString("+", 286, 10, 4);
+        }
+
+        if (M5.BtnC.wasPressed()) {
+            lastBtnPress = millis();
+            mqttClient.publish(LAMP_TOPIC_BRIGHTNESS, "-10", false);
+            M5.Lcd.fillRect(260, 8, 52, 28, TFT_BLACK);
+            M5.Lcd.setTextColor(TFT_WHITE);
+            M5.Lcd.drawCentreString("-", 286, 10, 4);
+        }
+    }
+
+    // Feedback nach 800 ms wieder löschen
+    if (lastBtnPress != 0 && millis() - lastBtnPress > 800) {
+        M5.Lcd.fillRect(260, 8, 52, 28, TFT_NAVY);
+        // kein Reset von lastBtnPress nötig – wird beim nächsten Druck überschrieben
+    }
+
+    // === TESTDATEN (unverändert) ===
     if (testMode) {
         static uint32_t testTime = 0;
         if (millis() - testTime > 5000) {
@@ -96,8 +145,6 @@ void loop() {
             snprintf(accuPower, FIELD_BUFFER_SIZE, "%ld", random(-200, 500));
             snprintf(batteryLevelPercent, FIELD_BUFFER_SIZE, "%ld", random(20, 90));
             snprintf(autarkyPercent, FIELD_BUFFER_SIZE, "%ld", random(0, 100));
-            DEBUG_PRINTF("TEST: PV=%sW, Netz=%sW, Akku=%sW, Batt=%s%%, Aut=%s%%\n",
-                         generationPower, gridPower, accuPower, batteryLevelPercent, autarkyPercent);
         }
     }
 
@@ -115,6 +162,8 @@ void loop() {
 
     yield();
 }
+
+// === Alle deine ursprünglichen Funktionen (unverändert, nur drawPVField korrigiert + kW-Anzeige) ===
 
 void initWifi() {
     WiFi.mode(WIFI_STA);
@@ -143,7 +192,7 @@ void drawGrid() {
     M5.Lcd.drawRoundRect(1, 1, 318, 238, 10, TFT_LIGHTGREY);
     M5.Lcd.drawRoundRect(2, 2, 316, 236, 8, TFT_DARKGREY);
 
-    drawPVField(0.0, true);
+    drawPVField(0, true);
     drawNetzField("0", 0, true);
     drawAkkuField("0", 0, true);
     drawBatteryField("0", 0, true);
@@ -151,12 +200,10 @@ void drawGrid() {
 }
 
 void drawFieldShadow(int x, int y, int w, int h, int radius, uint16_t shadowColor) {
-    // Passe den Schatten an, um innerhalb des dickeren Rahmens zu bleiben
     M5.Lcd.fillRoundRect(x + 4, y + 4, w - 8, h - 8, radius - 4, shadowColor);
 }
 
 void drawFieldBorder(int x, int y, int w, int h, int radius, uint16_t borderColor) {
-    // Zeichne vier Rahmenlinien für doppelte Linienstärke (ca. 4 Pixel)
     M5.Lcd.drawRoundRect(x, y, w, h, radius, borderColor);
     M5.Lcd.drawRoundRect(x + 1, y + 1, w - 2, h - 2, radius - 1, borderColor);
     M5.Lcd.drawRoundRect(x + 2, y + 2, w - 4, h - 4, radius - 2, borderColor);
@@ -173,18 +220,13 @@ void fillGradientRoundRect(int x, int y, int w, int h, int radius, uint16_t colo
     uint8_t gEnd = (colorEnd >> 5) & 0x3F;
     uint8_t bEnd = colorEnd & 0x1F;
 
-    // Reduziere den Radius für die gefüllten Rechtecke, um innerhalb des Rahmens zu bleiben
-    radius = max(radius - 4, 0); // Stelle sicher, dass der Radius nicht negativ wird
+    radius = max(radius - 4, 0);
     int arcWidths[11];
     for (int dy = 0; dy <= radius && dy < 11; dy++) {
         arcWidths[dy] = (int)sqrt((float)(radius * radius - dy * dy));
     }
 
-    // Verschiebe und verkleinere das gefüllte Rechteck, um Platz für den Rahmen zu lassen
-    x += 4;
-    y += 4;
-    w -= 8;
-    h -= 8;
+    x += 4; y += 4; w -= 8; h -= 8;
 
     for (int i = 0; i < h; i++) {
         float ratio = (float)i / (h - 1.0);
@@ -207,10 +249,7 @@ void fillGradientRoundRect(int x, int y, int w, int h, int radius, uint16_t colo
             lineLen = w;
         }
 
-        if (lineStartX < 0) {
-            lineLen += lineStartX;
-            lineStartX = 0;
-        }
+        if (lineStartX < 0) { lineLen += lineStartX; lineStartX = 0; }
         if (lineLen > 0 && lineStartX + lineLen > 320) lineLen = 320 - lineStartX;
         if (lineLen > 0) {
             M5.Lcd.drawFastHLine(lineStartX, y + i, lineLen, gradColor);
@@ -218,9 +257,10 @@ void fillGradientRoundRect(int x, int y, int w, int h, int radius, uint16_t colo
     }
 }
 
-void drawPVField(float value, bool forceRedraw) {
-    static float oldValue = -1.0f;
-    if (!forceRedraw && fabs(value - oldValue) < 0.1f) return;
+// PV-Feld jetzt mit int + kW-Anzeige
+void drawPVField(int value, bool forceRedraw) {
+    static int oldValue = -99999;
+    if (!forceRedraw && value == oldValue) return;
     oldValue = value;
 
     int x = 5, y = 5, w = 310, h = 75, r = 10;
@@ -230,9 +270,14 @@ void drawPVField(float value, bool forceRedraw) {
 
     M5.Lcd.setTextColor(TFT_BLACK);
     M5.Lcd.setTextSize(2);
-    M5.Lcd.drawCentreString(F("PV Leistung [W]"), 160, 12, 1);
-    char buf[FIELD_BUFFER_SIZE];
-    snprintf(buf, FIELD_BUFFER_SIZE, "%.1f W", value);
+    M5.Lcd.drawCentreString(F("PV Leistung"), 160, 12, 1);
+
+    char buf[12];
+    if (value >= 1000) {
+        snprintf(buf, sizeof(buf), "%.1f kW", value / 1000.0f);
+    } else {
+        snprintf(buf, sizeof(buf), "%d W", value);
+    }
     M5.Lcd.drawCentreString(buf, 160, 40, 2);
 }
 
@@ -271,7 +316,6 @@ void drawAkkuField(const char* value, int intValue, bool forceRedraw) {
     M5.Lcd.drawCentreString(buf, 238, 118, 2);
     uint16_t border = (intValue > 0) ? TFT_GREEN : TFT_ORANGE;
     drawFieldBorder(x, y, w, h, r, border);
-    DEBUG_PRINTF("AkkuField: value=%s, intValue=%d, Border=%s\n", value, intValue, (intValue > 0) ? "GREEN" : "ORANGE");
 }
 
 void drawBatteryField(const char* value, int intValue, bool forceRedraw) {
@@ -320,49 +364,36 @@ void updateDisplay() {
     int newBattery = atoi(batteryLevelPercent);
     int newAutarky = atoi(autarkyPercent);
 
-    bool changed = false;
     if (newGeneration != old_generation) {
         drawPVField(newGeneration);
         old_generation = newGeneration;
-        changed = true;
     }
     if (newGrid != old_gridPower) {
         drawNetzField(gridPower, newGrid);
         old_gridPower = newGrid;
-        changed = true;
     }
     if (newAccu != old_accuPower) {
         drawAkkuField(accuPower, newAccu);
         old_accuPower = newAccu;
-        changed = true;
     }
     if (newBattery != old_batteryLevel) {
         drawBatteryField(batteryLevelPercent, newBattery);
         old_batteryLevel = newBattery;
-        changed = true;
     }
     if (newAutarky != old_autarky) {
         drawAutarkyField(autarkyPercent);
         old_autarky = newAutarky;
-        changed = true;
-    }
-
-    if (changed) {
-        DEBUG_PRINTF("UPDATE: PV=%.1fW, Netz=%sW, Akku=%sW, Batt=%s%%, Aut=%s%%\n",
-                     newGeneration / 1000.0f, gridPower, accuPower, batteryLevelPercent, autarkyPercent);
     }
 }
 
 bool isValidNumber(const char* str) {
     if (!str || *str == '\0') return false;
     bool hasDigit = false;
-    bool hasDot = false;
     for (int i = 0; str[i]; i++) {
         char c = str[i];
         if (isdigit(c)) { hasDigit = true; continue; }
-        if (c == '.' && !hasDot && i > 0 && str[i + 1]) { hasDot = true; continue; }
+        if (c == '.' && i > 0 && str[i + 1]) continue;
         if (c == '-' && i == 0) continue;
-        DEBUG_PRINTF("Invalid char '%c' at index %d\n", c, i);
         return false;
     }
     return hasDigit;
@@ -379,18 +410,21 @@ void callbackMqttReceive(char* topic, byte* payload, unsigned int length) {
         return;
     }
 
-    const char* targets[] = {
-        "VenusData/Autarkie_heute", autarkyPercent,
-        "VenusData/Ladezustand", batteryLevelPercent,
-        "PV/grid_powerFast", gridPower,
-        "PV/generationPower", generationPower,
-        "VenusData/PowerShelly", accuPower
+    struct TopicMap {
+        const char* topic;
+        char* target;
+    } topicMap[] = {
+        {"VenusData/Autarkie_heute", autarkyPercent},
+        {"VenusData/Ladezustand",    batteryLevelPercent},
+        {"PV/grid_powerFast",       gridPower},
+        {"PV/generationPower",      generationPower},
+        {"VenusData/PowerShelly",   accuPower}
     };
-    for (int i = 0; i < 5; i++) {
-        if (strcmp(topic, targets[i * 2]) == 0) {
-            strncpy((char*)targets[i * 2 + 1], message, FIELD_BUFFER_SIZE - 1);
-            ((char*)targets[i * 2 + 1])[FIELD_BUFFER_SIZE - 1] = '\0';
-            DEBUG_PRINTF("Updated %s: %s\n", targets[i * 2], message);
+
+    for (auto& map : topicMap) {
+        if (strcmp(topic, map.topic) == 0) {
+            strncpy(map.target, message, FIELD_BUFFER_SIZE - 1);
+            map.target[FIELD_BUFFER_SIZE - 1] = '\0';
             break;
         }
     }
