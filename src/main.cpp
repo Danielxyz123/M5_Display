@@ -1,7 +1,7 @@
 // =============================================================================
 // M5Stack-Display für PV / Netz / Venus-Speicher
 // =============================================================================
-// Seiten (langer Druck auf B blättert):
+// Seiten (Taste A 3 s halten blättert):
 //   1. Übersicht: PV, Netz, Akku, Ladestand, Autarkie
 //      Rahmenfarbe Akku: grün = lädt, orange = entlädt, grau = Stand-by/voll,
 //                        rot = Störung am Venus (kein Sollwert, Modbus, keine Daten)
@@ -9,8 +9,8 @@
 //   2. Verlauf der letzten 60 min (Netz, PV, Akku)
 //   3. Diagnose (Bridge, Regelung, Venus-Controller, Display)
 //
-// Tasten:  kurz A = Lampe an/aus   kurz B = heller   kurz C = dunkler
-//          lang A = Testmodus      lang B = nächste Seite   lang C = Display dimmen
+// Tasten:  kurz (beim Loslassen):  A = Lampe an/aus   B = heller      C = dunkler
+//          3 s halten:             A = nächste Seite   B = Testmodus   C = Display dimmen
 // =============================================================================
 
 #include <M5Stack.h>
@@ -45,7 +45,7 @@
 #define MQTT_BACKOFF_MIN     1000
 #define MQTT_BACKOFF_MAX     30000
 #define MQTT_PACKET_SIZE     2048      // Venus-JSON ist ca. 1 KB
-#define LONG_PRESS_MS        800
+#define LONG_PRESS_MS        3000      // so lange halten für die Zweitfunktion
 #define FEEDBACK_MS          800
 #define BRIGHT_NORMAL        100
 #define BRIGHT_DIM           10
@@ -239,7 +239,7 @@ void setup() {
 
   forceRedraw = true;
   DEBUG_PRINT(F("Setup complete.\n"));
-  DEBUG_PRINT(F("kurz: A=Lampe B=heller C=dunkler | lang: A=Test B=Seite C=Dimmen\n"));
+  DEBUG_PRINT(F("kurz: A=Lampe B=heller C=dunkler | 3 s halten: A=Seite B=Test C=Dimmen\n"));
 }
 
 void loop() {
@@ -420,32 +420,67 @@ static void zeigeFeedback(const char* text, uint16_t color, uint8_t font) {
   feedbackUntil = millis() + FEEDBACK_MS;
 }
 
+// Wertet eine Taste aus:
+//   TASTE_LANG  sobald sie LONG_PRESS_MS gehalten wird (noch während des Haltens, einmalig)
+//   TASTE_KURZ  beim Loslassen (negative Flanke), wenn sie kürzer gehalten wurde
+//   TASTE_NICHTS sonst (auch beim Loslassen nach einem langen Druck)
+enum TastenEreignis { TASTE_NICHTS, TASTE_KURZ, TASTE_LANG };
+
+static TastenEreignis tasteAuswerten(Button& taste, bool& langErledigt) {
+  if (!langErledigt && taste.pressedFor(LONG_PRESS_MS)) {
+    langErledigt = true;
+    return TASTE_LANG;
+  }
+  if (taste.wasReleased()) {
+    const bool warLang = langErledigt;
+    langErledigt = false;
+    return warLang ? TASTE_NICHTS : TASTE_KURZ;
+  }
+  return TASTE_NICHTS;
+}
+
 void handleButtons() {
-  // Lang zuerst prüfen: wasReleasefor() ist nur bei langem Druck wahr
-  if (M5.BtnA.wasReleasefor(LONG_PRESS_MS)) {
-    testMode = !testMode;
-    DEBUG_PRINTF("Testmodus: %s\n", testMode ? "AN" : "AUS");
-    forceRedraw = true;
-  } else if (M5.BtnA.wasReleased()) {
-    lampOn = !lampOn;
-    mqttClient.publish(LAMP_TOPIC_ONOFF, lampOn ? "ON" : "OFF", true);   // retained
-    zeigeFeedback(lampOn ? "AN" : "AUS", lampOn ? TFT_GREEN : TFT_RED, 2);
+  static bool langA = false, langB = false, langC = false;
+
+  // A (links): kurz = Lampe an/aus, 3 s halten = nächste Seite
+  switch (tasteAuswerten(M5.BtnA, langA)) {
+    case TASTE_KURZ:
+      lampOn = !lampOn;
+      mqttClient.publish(LAMP_TOPIC_ONOFF, lampOn ? "ON" : "OFF", true);   // retained
+      zeigeFeedback(lampOn ? "AN" : "AUS", lampOn ? TFT_GREEN : TFT_RED, 2);
+      break;
+    case TASTE_LANG:
+      page = (page + 1) % 3;
+      forceRedraw = true;
+      break;
+    default: break;
   }
 
-  if (M5.BtnB.wasReleasefor(LONG_PRESS_MS)) {
-    page = (page + 1) % 3;
-    forceRedraw = true;
-  } else if (M5.BtnB.wasReleased()) {
-    mqttClient.publish(LAMP_TOPIC_BRIGHTNESS, "+10", false);
-    zeigeFeedback("+", TFT_WHITE, 4);
+  // B (Mitte): kurz = Lampe heller, 3 s halten = Testmodus an/aus
+  switch (tasteAuswerten(M5.BtnB, langB)) {
+    case TASTE_KURZ:
+      mqttClient.publish(LAMP_TOPIC_BRIGHTNESS, "+10", false);
+      zeigeFeedback("+", TFT_WHITE, 4);
+      break;
+    case TASTE_LANG:
+      testMode = !testMode;
+      DEBUG_PRINTF("Testmodus: %s\n", testMode ? "AN" : "AUS");
+      forceRedraw = true;
+      break;
+    default: break;
   }
 
-  if (M5.BtnC.wasReleasefor(LONG_PRESS_MS)) {
-    dimmed = !dimmed;
-    M5.Lcd.setBrightness(dimmed ? BRIGHT_DIM : BRIGHT_NORMAL);
-  } else if (M5.BtnC.wasReleased()) {
-    mqttClient.publish(LAMP_TOPIC_BRIGHTNESS, "-10", false);
-    zeigeFeedback("-", TFT_WHITE, 4);
+  // C (rechts): kurz = Lampe dunkler, 3 s halten = Display dimmen
+  switch (tasteAuswerten(M5.BtnC, langC)) {
+    case TASTE_KURZ:
+      mqttClient.publish(LAMP_TOPIC_BRIGHTNESS, "-10", false);
+      zeigeFeedback("-", TFT_WHITE, 4);
+      break;
+    case TASTE_LANG:
+      dimmed = !dimmed;
+      M5.Lcd.setBrightness(dimmed ? BRIGHT_DIM : BRIGHT_NORMAL);
+      break;
+    default: break;
   }
 }
 
