@@ -1,7 +1,7 @@
 // =============================================================================
 // M5Stack-Display für PV / Netz / Venus-Speicher
 // =============================================================================
-// Seiten (Taste A 3 s halten blättert):
+// Seiten (Taste A 1,5 s halten blättert):
 //   1. Übersicht: PV, Netz, Akku, Ladestand, Autarkie
 //      Rahmenfarbe Akku: grün = lädt, orange = entlädt, grau = Stand-by/voll,
 //                        rot = Störung am Venus (kein Sollwert, Modbus, keine Daten)
@@ -10,7 +10,7 @@
 //   3. Diagnose (Bridge, Regelung, Venus-Controller, Display)
 //
 // Tasten:  kurz (beim Loslassen):  A = Lampe an/aus   B = heller      C = dunkler
-//          3 s halten:             A = nächste Seite   B = Testmodus   C = Display dimmen
+//          halten:   A 1,5 s = nächste Seite   B 3 s = Testmodus   C 3 s = Display dimmen
 // =============================================================================
 
 #include <M5Stack.h>
@@ -45,7 +45,8 @@
 #define MQTT_BACKOFF_MIN     1000
 #define MQTT_BACKOFF_MAX     30000
 #define MQTT_PACKET_SIZE     2048      // Venus-JSON ist ca. 1 KB
-#define LONG_PRESS_MS        3000      // so lange halten für die Zweitfunktion
+#define LONG_PRESS_MS        3000      // so lange halten für Testmodus (B) und Dimmen (C)
+#define PAGE_PRESS_MS        1500      // so lange Taste A halten für den Seitenwechsel
 #define FEEDBACK_MS          800
 #define BRIGHT_NORMAL        100
 #define BRIGHT_DIM           10
@@ -239,7 +240,7 @@ void setup() {
 
   forceRedraw = true;
   DEBUG_PRINT(F("Setup complete.\n"));
-  DEBUG_PRINT(F("kurz: A=Lampe B=heller C=dunkler | 3 s halten: A=Seite B=Test C=Dimmen\n"));
+  DEBUG_PRINT(F("kurz: A=Lampe B=heller C=dunkler | halten: A 1,5 s=Seite, B 3 s=Test, C 3 s=Dimmen\n"));
 }
 
 void loop() {
@@ -426,8 +427,8 @@ static void zeigeFeedback(const char* text, uint16_t color, uint8_t font) {
 //   TASTE_NICHTS sonst (auch beim Loslassen nach einem langen Druck)
 enum TastenEreignis { TASTE_NICHTS, TASTE_KURZ, TASTE_LANG };
 
-static TastenEreignis tasteAuswerten(Button& taste, bool& langErledigt) {
-  if (!langErledigt && taste.pressedFor(LONG_PRESS_MS)) {
+static TastenEreignis tasteAuswerten(Button& taste, bool& langErledigt, uint32_t langMs = LONG_PRESS_MS) {
+  if (!langErledigt && taste.pressedFor(langMs)) {
     langErledigt = true;
     return TASTE_LANG;
   }
@@ -442,8 +443,8 @@ static TastenEreignis tasteAuswerten(Button& taste, bool& langErledigt) {
 void handleButtons() {
   static bool langA = false, langB = false, langC = false;
 
-  // A (links): kurz = Lampe an/aus, 3 s halten = nächste Seite
-  switch (tasteAuswerten(M5.BtnA, langA)) {
+  // A (links): kurz = Lampe an/aus, 1,5 s halten = nächste Seite
+  switch (tasteAuswerten(M5.BtnA, langA, PAGE_PRESS_MS)) {
     case TASTE_KURZ:
       lampOn = !lampOn;
       mqttClient.publish(LAMP_TOPIC_ONOFF, lampOn ? "ON" : "OFF", true);   // retained
