@@ -386,8 +386,12 @@ void callbackMqttReceive(char* topic, byte* payload, unsigned int length) {
     DEBUG_PRINTF("Ungueltig %s: %s\n", topic, msg);
     return;
   }
-  if (testMode) return;                                    // Testdaten nicht überschreiben
   const uint32_t now = millis();
+  // Im Testmodus werden nur die fünf angezeigten Werte durch Testdaten ersetzt;
+  // Lebenszeichen, Sollwert und Diagnose laufen normal weiter.
+  const bool anzeigeWert = !strcmp(topic, T_GRID) || !strcmp(topic, T_GEN) || !strcmp(topic, T_AKKU) ||
+                           !strcmp(topic, T_SOC)  || !strcmp(topic, T_AUTARKIE);
+  if (testMode && anzeigeWert) return;
 
   if      (!strcmp(topic, T_GRID))     { w.grid = v; w.tGrid = now; }
   else if (!strcmp(topic, T_GEN))      { w.gen = v; w.tGen = now; }
@@ -451,7 +455,7 @@ void handleTestMode() {
   testTime = millis();
   const uint32_t now = millis();
   w.gen  = random(0, 10000);   w.tGen  = now;
-  w.grid = random(-500, 1000); w.tGrid = now; w.tHb = now; w.gridValid = true;
+  w.grid = random(-500, 1000); w.tGrid = now;
   w.akku = random(-500, 500);  w.tAkku = now;
   w.soc  = random(20, 90);     w.tSoc  = now;
   w.autarkie = random(0, 100); w.tAutarkie = now;
