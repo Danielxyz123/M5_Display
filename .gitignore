@@ -6,3 +6,6 @@
 
 # Lokale Zugangsdaten
 include/secrets.h
+
+# Lokale OTA-Einstellungen (Passwort)
+ota.ini

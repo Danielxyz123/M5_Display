@@ -23,6 +23,7 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <esp_task_wdt.h>
+#include <ArduinoOTA.h>                // Updates über WLAN
 #include <math.h>
 #include <cmath>
 
@@ -282,8 +283,58 @@ void setup() {
   DEBUG_PRINT(F("kurz: A=Lampe B=heller C=dunkler | halten: A 1,5 s=Seite, B 3 s=Test, C 3 s=Dimmen\n"));
 }
 
+// =============================================================================
+// OTA: Updates über WLAN (PlatformIO-Umgebung "m5stack-core-esp32-ota")
+// =============================================================================
+#define OTA_HOSTNAME "m5display"
+
+static void otaStatus(const char* zeile1, const char* zeile2, uint16_t farbe) {
+  M5.Lcd.fillScreen(TFT_NAVY);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setTextColor(farbe);
+  M5.Lcd.drawCentreString(zeile1, 160, 80, 4);
+  M5.Lcd.setTextColor(TFT_WHITE);
+  M5.Lcd.drawCentreString(zeile2, 160, 120, 2);
+}
+
+void handleOta() {
+  static bool gestartet = false;
+  if (!gestartet) {
+    if (WiFi.status() != WL_CONNECTED) return;
+    ArduinoOTA.setHostname(OTA_HOSTNAME);
+#ifdef OTA_PASS
+    ArduinoOTA.setPassword(OTA_PASS);
+#endif
+    ArduinoOTA.onStart([]() {
+      esp_task_wdt_delete(NULL);                            // Update dauert länger als der Watchdog
+      mqttClient.disconnect();
+      otaStatus("Update", "wird uebertragen ...", TFT_YELLOW);
+      M5.Lcd.drawRect(40, 160, 240, 20, TFT_WHITE);
+    });
+    ArduinoOTA.onProgress([](unsigned int fertig, unsigned int gesamt) {
+      if (gesamt) M5.Lcd.fillRect(42, 162, (int)(236UL * fertig / gesamt), 16, TFT_GREEN);
+    });
+    ArduinoOTA.onEnd([]() {
+      otaStatus("Update fertig", "Neustart ...", TFT_GREEN);
+    });
+    ArduinoOTA.onError([](ota_error_t fehler) {
+      char buf[32];
+      snprintf(buf, sizeof(buf), "Fehler %u", (unsigned)fehler);
+      otaStatus("Update fehlgeschlagen", buf, TFT_RED);
+      delay(3000);
+      esp_task_wdt_add(NULL);
+      forceRedraw = true;
+    });
+    ArduinoOTA.begin();
+    gestartet = true;
+    DEBUG_PRINTF("OTA bereit: %s.local / %s\n", OTA_HOSTNAME, WiFi.localIP().toString().c_str());
+  }
+  ArduinoOTA.handle();
+}
+
 void loop() {
   esp_task_wdt_reset();
+  handleOta();
   M5.update();
 
   handleButtons();
@@ -1002,6 +1053,8 @@ void drawDiagnose() {
   snprintf(buf, sizeof(buf), "%d dBm, MQTT %s, %s", (int)WiFi.RSSI(),
            mqttClient.connected() ? "ok" : "weg", d1);
   diagZeile(y, "Display", buf, mqttClient.connected() ? TFT_WHITE : TFT_RED); y += 17;
+  snprintf(buf, sizeof(buf), "%s (%s.local)", WiFi.localIP().toString().c_str(), OTA_HOSTNAME);
+  diagZeile(y, "  IP / OTA", buf, TFT_WHITE); y += 17;
 
   // Letzte Störung
   if (lastFaultMillis) {

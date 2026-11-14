@@ -1,0 +1,6 @@
+; Vorlage: nach ota.ini kopieren, Passwort wie OTA_PASS in include/secrets.h eintragen
+[env:m5stack-core-esp32-ota]
+extends = env:m5stack-core-esp32
+upload_protocol = espota
+upload_port = m5display.local      ; oder die IP-Adresse aus der Diagnoseseite
+upload_flags = --auth=MeinOtaPasswort
