@@ -6,8 +6,13 @@
 //      Rahmenfarbe Akku: grün = lädt, orange = entlädt, grau = Stand-by/voll,
 //                        rot = Störung am Venus (kein Sollwert, Modbus, keine Daten)
 //      Grauer Wert = Daten nicht aktuell
-//   2. Verlauf der letzten 60 min (Netz, PV, Akku)
-//   3. Diagnose (Bridge, Regelung, Venus-Controller, Display)
+//   2. Heizung: Außentemperatur, Vorlauf FBH, Kessel, Warmwasser,
+//      Brenner heute (Laufzeit, Starts, Laufzeitanteil der letzten 24 h)
+//      Rahmen: Kessel orange = Brenner läuft, Warmwasser orange = Speicherladung,
+//      rot = Vorlauf bzw. Warmwasser deutlich unter Soll
+//      Seite 1 und 2 wechseln automatisch alle 10 s
+//   3. Verlauf der letzten 60 min (Netz, PV, Akku)
+//   4. Diagnose (Bridge, Regelung, Venus-Controller, Display)
 //
 // Tasten:  kurz (beim Loslassen):  A = Lampe an/aus   B = heller      C = dunkler
 //          halten:   A 1,5 s = nächste Seite   B 3 s = Testmodus   C 3 s = Display dimmen
@@ -80,6 +85,25 @@
 #define T_VENUS     "Venus-control"
 #define T_SOLL      "Ven_Neu/powerNeu"
 #define T_ONLINE    "M5Display/online"
+#define T_HEIZUNG   "oeg_kmsd/state"                      // Heizungsregelung OEG KMS-D (JSON, ca. alle 10 s)
+#define T_BR_ZEIT   "Heizung/Brenner_Laufzeit_heute"      // vom ioBroker-Skript gespiegelt [h]
+#define T_BR_STARTS "Heizung/Brenner_Starts_heute"
+#define T_BR_24H    "Heizung/Brenner_Anteil_24h"          // Brennerlaufzeit-Anteil letzte 24 h [%]
+
+// Heizung
+#define HEIZ_MAX_AGE_MS      120000    // Heizungsregelung sendet ca. alle 10 s
+#define BRENNER_MAX_AGE_MS   600000    // Brennerwerte kommen spätestens jede Minute
+#define FBH_ABWEICHUNG_K     5.0f      // Vorlauf so weit unter Soll → roter Rahmen
+#define WW_ABWEICHUNG_K      5.0f      // Warmwasser so weit unter Soll → roter Rahmen
+
+// Seiten
+#define SEITE_SOLAR          0
+#define SEITE_HEIZUNG        1
+#define SEITE_VERLAUF        2
+#define SEITE_DIAGNOSE       3
+#define SEITEN               4
+#define AUTO_WECHSEL_MS      10000     // Solar ↔ Heizung automatisch
+#define AUTO_RUECKKEHR_MS    120000    // von Verlauf/Diagnose zurück in den Wechsel
 
 // === LAMPE STEUERUNG ÜBER TASTEN ===
 #define LAMP_TOPIC_ONOFF        "lampe/wohnzimmer/set"            // ioBroker: ON / OFF (retained)
@@ -100,14 +124,25 @@ struct Werte {
   uint32_t venusLifebit = 0, tVenusLifebit = 0, venusUptime = 0;
   int      venusSet = 0, venusAc = 0;
   char     venusReset[20] = "";
+  // Heizung
+  float    tAussen = 0, tKessel = 0, tVorlauf = 0, tWW = 0;
+  float    sollKessel = 0, sollVorlauf = 0, sollWW = 0;
+  uint32_t relais = 0;
+  uint32_t tHeiz = 0;
+  float    brennerH = 0;
+  int      brennerStarts = 0;
+  float    brennerAnteil24 = 0;
+  bool     brennerAnteil24Da = false;
+  uint32_t tBrenner = 0;
 } w;
 
 struct FieldState {                    // zuletzt gezeichneter Zustand eines Feldes
-  char     text[16];
+  char     text[32];
   uint16_t border;
   uint16_t textColor;
 };
 FieldState fsPV = {}, fsNetz = {}, fsAkku = {}, fsSoc = {}, fsAut = {};
+FieldState fsAussen = {}, fsVorlauf = {}, fsKessel = {}, fsWW = {}, fsBrenner = {};
 
 int16_t  histGrid[HIST_POINTS], histGen[HIST_POINTS], histAkku[HIST_POINTS];
 uint16_t histIdx = 0;
@@ -116,7 +151,9 @@ uint32_t histLast = 0;
 WiFiClient   espClient;
 PubSubClient mqttClient(espClient);
 
-uint8_t  page = 0;                     // 0 = Übersicht, 1 = Verlauf, 2 = Diagnose
+uint8_t  page = SEITE_SOLAR;
+uint32_t lastPageSwitch = 0;           // für den automatischen Wechsel
+uint32_t lastButton = 0;               // letzter Tastendruck
 bool     forceRedraw = true;
 bool     dimmed = false;
 bool     testMode = false;
@@ -137,6 +174,8 @@ void handleTestMode();
 void sampleHistory();
 void drawPage();
 void drawOverview(bool force);
+void drawHeizung();
+void handleAutoWechsel();
 void drawHistory();
 void drawDiagnose();
 void drawFieldShadow(int x, int y, int w, int h, int radius, uint16_t shadowColor);
@@ -253,13 +292,13 @@ void loop() {
   handleTestMode();
   sampleHistory();
   pruefeStoerung();
+  handleAutoWechsel();
 
   // Rückmeldung zum Tastendruck nach kurzer Zeit wieder entfernen (einmalig neu zeichnen)
   if (feedbackUntil != 0 && millis() > feedbackUntil) {
     feedbackUntil = 0;
-    if (page == 0) {
-      fsPV.text[0] = '\0';                                  // PV-Feld neu zeichnen erzwingen
-    }
+    fsPV.text[0] = '\0';                                    // oberes Feld neu zeichnen erzwingen
+    fsAussen.text[0] = '\0';
   }
 
   if (millis() - updateTimeOld > UPDATE_INTERVAL) {
@@ -321,7 +360,8 @@ void handleMqtt() {
       mqttClient.publish(T_ONLINE, "1", true);
       const char* topics[] = {
         T_GRID, T_GEN, T_HB, T_GVALID, T_INV, T_RSSI, T_MQC, T_MBERR, T_BUPTIME,
-        T_AKKU, T_SOC, T_AUTARKIE, T_VENUS, T_SOLL, LAMP_TOPIC_ONOFF
+        T_AKKU, T_SOC, T_AUTARKIE, T_VENUS, T_SOLL, LAMP_TOPIC_ONOFF,
+        T_HEIZUNG, T_BR_ZEIT, T_BR_STARTS, T_BR_24H
       };
       for (auto t : topics) mqttClient.subscribe(t);
       backoff = MQTT_BACKOFF_MIN;
@@ -367,9 +407,30 @@ static void verarbeiteVenus(byte* payload, unsigned int length) {
   w.tVenus        = millis();
 }
 
+static void verarbeiteHeizung(byte* payload, unsigned int length) {
+  StaticJsonDocument<512> doc;
+  if (deserializeJson(doc, payload, length)) {
+    DEBUG_PRINT(F("Heizungs-JSON fehlerhaft\n"));
+    return;
+  }
+  w.tAussen     = doc["t2"] | 0.0f;
+  w.tKessel     = doc["t3"] | 0.0f;
+  w.tVorlauf    = doc["t4"] | 0.0f;
+  w.tWW         = doc["t5"] | 0.0f;
+  w.sollKessel  = doc["boiler_set"] | 0.0f;
+  w.sollVorlauf = doc["flow_set"] | 0.0f;
+  w.sollWW      = doc["dhw_set"] | 0.0f;
+  w.relais      = doc["relays"] | 0;
+  w.tHeiz       = millis();
+}
+
 void callbackMqttReceive(char* topic, byte* payload, unsigned int length) {
   if (strcmp(topic, T_VENUS) == 0) {                      // großes JSON
     verarbeiteVenus(payload, length);
+    return;
+  }
+  if (strcmp(topic, T_HEIZUNG) == 0) {
+    verarbeiteHeizung(payload, length);
     return;
   }
 
@@ -407,13 +468,16 @@ void callbackMqttReceive(char* topic, byte* payload, unsigned int length) {
   else if (!strcmp(topic, T_SOC))      { w.soc = lroundf(v); w.tSoc = now; }
   else if (!strcmp(topic, T_AUTARKIE)) { w.autarkie = lroundf(v); w.tAutarkie = now; }
   else if (!strcmp(topic, T_SOLL))     { w.soll = v * 1000.0f; w.tSoll = now; }
+  else if (!strcmp(topic, T_BR_ZEIT))  { w.brennerH = v; w.tBrenner = now; }
+  else if (!strcmp(topic, T_BR_STARTS)){ w.brennerStarts = lroundf(v); w.tBrenner = now; }
+  else if (!strcmp(topic, T_BR_24H))   { w.brennerAnteil24 = v; w.brennerAnteil24Da = true; w.tBrenner = now; }
 }
 
 // =============================================================================
 // Tasten
 // =============================================================================
 static void zeigeFeedback(const char* text, uint16_t color, uint8_t font) {
-  if (page != 0) return;
+  if (page != SEITE_SOLAR && page != SEITE_HEIZUNG) return;
   M5.Lcd.fillRect(260, 8, 52, 28, TFT_BLACK);
   M5.Lcd.setTextColor(color);
   M5.Lcd.setTextSize(1);
@@ -440,8 +504,28 @@ static TastenEreignis tasteAuswerten(Button& taste, bool& langErledigt, uint32_t
   return TASTE_NICHTS;
 }
 
+// Automatischer Wechsel Solar ↔ Heizung; von Verlauf/Diagnose nach einer Weile zurück
+void handleAutoWechsel() {
+  const uint32_t now = millis();
+  if (page == SEITE_SOLAR || page == SEITE_HEIZUNG) {
+    if (now - lastPageSwitch >= AUTO_WECHSEL_MS && feedbackUntil == 0 &&
+        !M5.BtnA.isPressed() && !M5.BtnB.isPressed() && !M5.BtnC.isPressed()) {
+      page = (page == SEITE_SOLAR) ? SEITE_HEIZUNG : SEITE_SOLAR;
+      lastPageSwitch = now;
+      forceRedraw = true;
+    }
+  } else if (now - lastButton >= AUTO_RUECKKEHR_MS) {
+    page = SEITE_SOLAR;
+    lastPageSwitch = now;
+    forceRedraw = true;
+  }
+}
+
 void handleButtons() {
   static bool langA = false, langB = false, langC = false;
+  if (M5.BtnA.isPressed() || M5.BtnB.isPressed() || M5.BtnC.isPressed()) {
+    lastButton = millis();
+  }
 
   // A (links): kurz = Lampe an/aus, 1,5 s halten = nächste Seite
   switch (tasteAuswerten(M5.BtnA, langA, PAGE_PRESS_MS)) {
@@ -451,7 +535,8 @@ void handleButtons() {
       zeigeFeedback(lampOn ? "AN" : "AUS", lampOn ? TFT_GREEN : TFT_RED, 2);
       break;
     case TASTE_LANG:
-      page = (page + 1) % 3;
+      page = (page + 1) % SEITEN;
+      lastPageSwitch = millis();
       forceRedraw = true;
       break;
     default: break;
@@ -513,7 +598,7 @@ void sampleHistory() {
   histGen[histIdx]  = frisch(w.tGen, BRIDGE_MAX_AGE_MS) ? clamp16(w.gen) : HIST_INVALID;
   histAkku[histIdx] = frisch(w.tAkku, AKKU_MAX_AGE_MS) ? clamp16(w.akku) : HIST_INVALID;
   histIdx = (histIdx + 1) % HIST_POINTS;
-  if (page == 1) forceRedraw = true;                       // neue Daten → Diagramm neu
+  if (page == SEITE_VERLAUF) forceRedraw = true;                      // neue Daten → Diagramm neu
 }
 
 // =============================================================================
@@ -527,11 +612,13 @@ void drawPage() {
     M5.Lcd.drawRoundRect(1, 1, 318, 238, 10, TFT_LIGHTGREY);
     M5.Lcd.drawRoundRect(2, 2, 316, 236, 8, TFT_DARKGREY);
     fsPV.text[0] = fsNetz.text[0] = fsAkku.text[0] = fsSoc.text[0] = fsAut.text[0] = '\0';
+    fsAussen.text[0] = fsVorlauf.text[0] = fsKessel.text[0] = fsWW.text[0] = fsBrenner.text[0] = '\0';
   }
   switch (page) {
-    case 0: drawOverview(force); break;
-    case 1: if (force) drawHistory(); break;
-    case 2: drawDiagnose(); break;
+    case SEITE_SOLAR:    drawOverview(force); break;
+    case SEITE_HEIZUNG:  drawHeizung(); break;
+    case SEITE_VERLAUF:  if (force) drawHistory(); break;
+    case SEITE_DIAGNOSE: drawDiagnose(); break;
   }
 }
 
@@ -676,6 +763,128 @@ void drawOverview(bool force) {
     M5.Lcd.setTextSize(1);
     M5.Lcd.drawString("TEST", 12, 10, 2);
   }
+}
+
+// =============================================================================
+// Heizungsseite
+// =============================================================================
+struct HFeld {
+  int x, y, w, h, r;
+  uint16_t shadow, gradStart, gradEnd;
+  const char* titel;
+  int cx, titelY, titelFont, titelSize;
+  int wertY, wertFont, wertSize;
+  int subY, subFont;                   // subY = 0: keine zweite Zeile
+};
+
+static const HFeld H_AUSSEN  = {  5,   5, 310, 75, 10, TFT_BLUE,      TFT_CYAN,    TFT_BLUE,        "Aussentemperatur", 160,  12, 1, 2,  40, 2, 2,   0, 0 };
+static const HFeld H_VORLAUF = {  5,  85, 147, 80,  8, TFT_DARKGREEN, TFT_GREEN,   TFT_GREENYELLOW, "Vorlauf FBH",       78,  92, 1, 2, 108, 2, 2, 146, 2 };
+static const HFeld H_KESSEL  = {165,  85, 147, 80,  8, TFT_DARKGREY,  TFT_ORANGE,  TFT_YELLOW,      "Kessel",           238,  92, 1, 2, 108, 2, 2, 146, 2 };
+static const HFeld H_WW      = {  5, 170, 147, 65,  8, TFT_DARKGREY,  TFT_YELLOW,  TFT_WHITE,       "Warmwasser",        78, 175, 2, 1, 191, 4, 1, 221, 1 };
+static const HFeld H_BRENNER = {165, 170, 147, 65,  8, TFT_PURPLE,    TFT_MAGENTA, TFT_PINK,        "Brenner heute",    238, 175, 2, 1, 191, 4, 1, 221, 1 };
+
+// Zahl mit einer Nachkommastelle und deutschem Komma
+static void fmtKomma(char* buf, size_t len, float v) {
+  snprintf(buf, len, "%.1f", v);
+  for (char* p = buf; *p; p++) if (*p == '.') *p = ',';
+}
+
+// Wert zentriert ausgeben, optional mit Grad-Zeichen (die Schriften haben kein °)
+static void drawWert(const char* zahl, bool grad, int cx, int y, int font, int size, uint16_t color) {
+  M5.Lcd.setTextColor(color);
+  M5.Lcd.setTextSize(size);
+  if (!grad) {
+    M5.Lcd.drawCentreString(zahl, cx, y, font);
+    return;
+  }
+  const int r   = 2 + size;                                  // Radius des Grad-Kreises
+  const int wz  = M5.Lcd.textWidth(zahl, font);
+  const int wc  = M5.Lcd.textWidth("C", font);
+  const int gap = 2 * r + 6;
+  const int x0  = cx - (wz + gap + wc) / 2;
+  M5.Lcd.drawString(zahl, x0, y, font);
+  M5.Lcd.drawCircle(x0 + wz + gap / 2, y + r + 2, r, color);
+  M5.Lcd.drawCircle(x0 + wz + gap / 2, y + r + 2, r - 1, color);
+  M5.Lcd.drawString("C", x0 + wz + gap, y, font);
+}
+
+static void drawHFeld(const HFeld& d, FieldState& st, const char* zahl, bool grad,
+                      const char* sub, uint16_t border, uint16_t textColor) {
+  char key[32];
+  snprintf(key, sizeof(key), "%s|%s", zahl, sub ? sub : "");
+  if (strcmp(st.text, key) == 0 && st.border == border && st.textColor == textColor) return;
+  strncpy(st.text, key, sizeof(st.text) - 1);
+  st.text[sizeof(st.text) - 1] = '\0';
+  st.border = border;
+  st.textColor = textColor;
+
+  drawFieldShadow(d.x, d.y, d.w, d.h, d.r, d.shadow);
+  fillGradientRoundRect(d.x, d.y, d.w, d.h, d.r, d.gradStart, d.gradEnd);
+  drawFieldBorder(d.x, d.y, d.w, d.h, d.r, border);
+
+  M5.Lcd.setTextColor(TFT_BLACK);
+  M5.Lcd.setTextSize(d.titelSize);
+  M5.Lcd.drawCentreString(d.titel, d.cx, d.titelY, d.titelFont);
+  drawWert(zahl, grad, d.cx, d.wertY, d.wertFont, d.wertSize, textColor);
+  if (d.subY && sub && *sub) {
+    M5.Lcd.setTextColor(textColor);
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.drawCentreString(sub, d.cx, d.subY, d.subFont);
+  }
+  M5.Lcd.setTextSize(1);
+}
+
+void drawHeizung() {
+  const bool daten  = w.tHeiz != 0;
+  const bool aktuell = frisch(w.tHeiz, HEIZ_MAX_AGE_MS);
+  const uint16_t farbe = aktuell ? TFT_BLACK : TFT_DARKGREY;
+  const bool brenner     = w.relais & (1u << 0);              // R1 = Brenner
+  const bool speicherLad = w.relais & (1u << 4);              // R5 = Speicherladung Warmwasser
+  char zahl[12], sub[24], soll[12];
+
+  // Außentemperatur
+  if (daten) fmtKomma(zahl, sizeof(zahl), w.tAussen); else strcpy(zahl, "--");
+  if (feedbackUntil == 0) {                                  // Tasten-Rückmeldung nicht übermalen
+    drawHFeld(H_AUSSEN, fsAussen, zahl, daten, nullptr, TFT_DARKCYAN, farbe);
+  }
+
+  // Vorlauf Fußbodenheizung: rot, wenn deutlich unter Soll
+  if (daten) fmtKomma(zahl, sizeof(zahl), w.tVorlauf); else strcpy(zahl, "--");
+  fmtKomma(soll, sizeof(soll), w.sollVorlauf);
+  snprintf(sub, sizeof(sub), "Soll %s", soll);
+  const bool vorlaufTief = aktuell && w.tVorlauf < w.sollVorlauf - FBH_ABWEICHUNG_K;
+  drawHFeld(H_VORLAUF, fsVorlauf, zahl, daten, daten ? sub : nullptr,
+            vorlaufTief ? TFT_RED : TFT_DARKGREEN, farbe);
+
+  // Kessel: orange, solange der Brenner läuft
+  if (daten) fmtKomma(zahl, sizeof(zahl), w.tKessel); else strcpy(zahl, "--");
+  snprintf(sub, sizeof(sub), "Soll %d", (int)lroundf(w.sollKessel));
+  drawHFeld(H_KESSEL, fsKessel, zahl, daten, daten ? sub : nullptr,
+            (aktuell && brenner) ? TFT_ORANGE : TFT_DARKGREY, farbe);
+
+  // Warmwasser: orange bei Speicherladung, rot wenn deutlich unter Soll
+  if (daten) fmtKomma(zahl, sizeof(zahl), w.tWW); else strcpy(zahl, "--");
+  snprintf(sub, sizeof(sub), "Soll %d", (int)lroundf(w.sollWW));
+  uint16_t wwBorder = TFT_DARKGREY;
+  if (aktuell && speicherLad)                          wwBorder = TFT_ORANGE;
+  else if (aktuell && w.tWW < w.sollWW - WW_ABWEICHUNG_K) wwBorder = TFT_RED;
+  drawHFeld(H_WW, fsWW, zahl, daten, daten ? sub : nullptr, wwBorder, farbe);
+
+  // Brenner heute (vom ioBroker-Skript)
+  const bool brOk = frisch(w.tBrenner, BRENNER_MAX_AGE_MS);
+  if (w.tBrenner) {
+    fmtKomma(zahl, sizeof(zahl), w.brennerH);
+    strncat(zahl, " h", sizeof(zahl) - strlen(zahl) - 1);
+    if (w.brennerAnteil24Da) {
+      snprintf(sub, sizeof(sub), "%d Starts | 24h %d%%", w.brennerStarts, (int)lroundf(w.brennerAnteil24));
+    } else {
+      snprintf(sub, sizeof(sub), "%d Starts", w.brennerStarts);
+    }
+  } else {
+    strcpy(zahl, "--");
+    sub[0] = '\0';
+  }
+  drawHFeld(H_BRENNER, fsBrenner, zahl, false, sub, TFT_PURPLE, brOk ? TFT_BLACK : TFT_DARKGREY);
 }
 
 void drawHistory() {
