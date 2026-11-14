@@ -2,7 +2,7 @@
 // M5Stack-Display für PV / Netz / Venus-Speicher
 // =============================================================================
 // Seiten (Taste A 1,5 s halten blättert):
-//   1. Übersicht: PV, Netz, Akku, Ladestand, Autarkie
+//   1. Übersicht: PV (Leistung und Tagesertrag), Netz, Akku, Ladestand, Autarkie
 //      Rahmenfarbe Akku: grün = lädt, orange = entlädt, grau = Stand-by/voll,
 //                        rot = Störung am Venus (kein Sollwert, Modbus, keine Daten)
 //      Grauer Wert = Daten nicht aktuell
@@ -63,6 +63,7 @@
 #define SOLL_MAX_AGE_MS      10000     // Regelskript sendet jede Sekunde
 #define AKKU_MAX_AGE_MS      60000     // Shelly-Spiegel sendet nur bei Änderung
 #define SLOW_MAX_AGE_MS      1800000UL // Ladestand/Autarkie ändern sich selten
+#define PV_HEUTE_MAX_AGE_MS  600000    // Tagesertrag kommt alle 30 s
 #define STANDBY_W            15        // darunter gilt der Akku als ruhend
 
 // Verlauf: 120 Punkte à 30 s = 60 min
@@ -73,6 +74,7 @@
 // === TOPICS ===
 #define T_GRID      "PV/grid_powerFast"
 #define T_GEN       "PV/generationPower"
+#define T_PV_HEUTE  "PV/generation_totalPerDay"           // PV-Ertrag heute [kWh] (Bridge, um Mitternacht 0)
 #define T_HB        "PV/heartbeat"
 #define T_GVALID    "PV/gridValid"
 #define T_INV       "PV/inverterOnline"
@@ -112,8 +114,9 @@
 
 // === DATEN ===
 struct Werte {
-  float    grid = 0, gen = 0, akku = 0, soll = 0;
+  float    grid = 0, gen = 0, akku = 0, soll = 0, pvHeute = 0;
   int      soc = 0, autarkie = 0;
+  uint32_t tPvHeute = 0;
   uint32_t tGrid = 0, tGen = 0, tAkku = 0, tSoc = 0, tAutarkie = 0, tHb = 0, tVenus = 0, tSoll = 0;
   uint32_t hb = 0;
   bool     gridValid = false, invOnline = false;
@@ -411,7 +414,7 @@ void handleMqtt() {
       mqttClient.publish(T_ONLINE, "1", true);
       const char* topics[] = {
         T_GRID, T_GEN, T_HB, T_GVALID, T_INV, T_RSSI, T_MQC, T_MBERR, T_BUPTIME,
-        T_AKKU, T_SOC, T_AUTARKIE, T_VENUS, T_SOLL, LAMP_TOPIC_ONOFF,
+        T_AKKU, T_SOC, T_AUTARKIE, T_VENUS, T_SOLL, LAMP_TOPIC_ONOFF, T_PV_HEUTE,
         T_HEIZUNG, T_BR_ZEIT, T_BR_STARTS, T_BR_24H
       };
       for (auto t : topics) mqttClient.subscribe(t);
@@ -508,6 +511,7 @@ void callbackMqttReceive(char* topic, byte* payload, unsigned int length) {
 
   if      (!strcmp(topic, T_GRID))     { w.grid = v; w.tGrid = now; }
   else if (!strcmp(topic, T_GEN))      { w.gen = v; w.tGen = now; }
+  else if (!strcmp(topic, T_PV_HEUTE)) { w.pvHeute = v; w.tPvHeute = now; }
   else if (!strcmp(topic, T_HB))       { if ((uint32_t)v != w.hb) { w.hb = (uint32_t)v; w.tHb = now; } }
   else if (!strcmp(topic, T_GVALID))   { w.gridValid = (v > 0.5f); }
   else if (!strcmp(topic, T_INV))      { w.invOnline = (v > 0.5f); }
@@ -767,6 +771,36 @@ static const FeldDef F_AKKU = {165,  85, 147, 80,  8, TFT_DARKGREY, TFT_ORANGE, 
 static const FeldDef F_SOC  = {  5, 170, 147, 65,  8, TFT_DARKGREY, TFT_YELLOW, TFT_WHITE,       "Akku Level [%]",   78, 177, 2, 1, 200, 2, 2 };
 static const FeldDef F_AUT  = {165, 170, 147, 65,  8, TFT_PURPLE,   TFT_MAGENTA, TFT_PINK,       "Autarkie [%]",    238, 177, 2, 1, 200, 2, 2 };
 
+static void fmtKomma(char* buf, size_t len, float v);
+
+// PV-Feld: aktuelle Leistung links, Tagesertrag rechts
+static void drawPVFeld(const char* leistung, uint16_t farbeLeistung,
+                       const char* heute, uint16_t farbeHeute) {
+  char key[32];
+  snprintf(key, sizeof(key), "%s|%s|%u", leistung, heute, farbeHeute);
+  if (strcmp(fsPV.text, key) == 0 && fsPV.textColor == farbeLeistung) return;
+  strncpy(fsPV.text, key, sizeof(fsPV.text) - 1);
+  fsPV.text[sizeof(fsPV.text) - 1] = '\0';
+  fsPV.textColor = farbeLeistung;
+  fsPV.border = TFT_DARKCYAN;
+
+  const FeldDef& d = F_PV;
+  drawFieldShadow(d.x, d.y, d.w, d.h, d.r, d.shadow);
+  fillGradientRoundRect(d.x, d.y, d.w, d.h, d.r, d.gradStart, d.gradEnd);
+  drawFieldBorder(d.x, d.y, d.w, d.h, d.r, TFT_DARKCYAN);
+
+  M5.Lcd.setTextColor(TFT_BLACK);
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.drawCentreString(d.titel, 160, d.titelY, 1);
+  M5.Lcd.setTextColor(farbeLeistung);
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.drawCentreString(leistung, 105, 40, 2);           // aktuelle Leistung
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setTextColor(farbeHeute);
+  M5.Lcd.drawCentreString("heute", 250, 30, 2);            // Tagesertrag
+  M5.Lcd.drawCentreString(heute, 250, 47, 4);              // größere Schrift (26 px)
+}
+
 void drawOverview(bool force) {
   (void)force;
   char buf[16];
@@ -774,11 +808,15 @@ void drawOverview(bool force) {
 
   // PV: grau, wenn keine aktuellen Daten oder Wechselrichter aus (Nacht)
   const int gen = lroundf(w.gen);
-  if (gen >= 1000) snprintf(buf, sizeof(buf), "%.1f kW", gen / 1000.0f);
+  if (gen >= 1000) { fmtKomma(buf, sizeof(buf), gen / 1000.0f); strncat(buf, " kW", sizeof(buf) - strlen(buf) - 1); }
   else             snprintf(buf, sizeof(buf), "%d W", gen);
   const bool pvAktuell = (bridge && frisch(w.tGen, BRIDGE_MAX_AGE_MS)) || testMode;
+  char heute[16];
+  if (w.tPvHeute) { fmtKomma(heute, sizeof(heute), w.pvHeute); strncat(heute, " kWh", sizeof(heute) - strlen(heute) - 1); }
+  else            strcpy(heute, "--");
+  const bool heuteAktuell = frisch(w.tPvHeute, PV_HEUTE_MAX_AGE_MS) || testMode;
   if (feedbackUntil == 0) {                                // Feedback-Anzeige nicht übermalen
-    drawFeld(F_PV, fsPV, buf, TFT_DARKCYAN, pvAktuell ? TFT_BLACK : TFT_DARKGREY);
+    drawPVFeld(buf, pvAktuell ? TFT_BLACK : TFT_DARKGREY, heute, heuteAktuell ? TFT_BLACK : TFT_DARKGREY);
   }
 
   // Netz: Rahmen rot bei > 500 W Bezug oder veraltetem Zählerwert
