@@ -6,7 +6,7 @@
 //      Rahmenfarbe Akku: grün = lädt, orange = entlädt, grau = Stand-by/voll,
 //                        rot = Störung am Venus (kein Sollwert, Modbus, keine Daten)
 //      Grauer Wert = Daten nicht aktuell
-//   2. Heizung: Außentemperatur, Vorlauf FBH, Kessel, Warmwasser,
+//   2. Heizung: Außen- und Wohnzimmertemperatur, Vorlauf FBH, Kessel, Warmwasser,
 //      Brenner heute (Laufzeit, Starts, Laufzeitanteil der letzten 24 h)
 //      Rahmen: Kessel orange = Brenner läuft, Warmwasser orange = Speicherladung,
 //      rot = Vorlauf bzw. Warmwasser deutlich unter Soll
@@ -92,6 +92,8 @@
 #define T_BR_ZEIT   "Heizung/Brenner_Laufzeit_heute"      // vom ioBroker-Skript gespiegelt [h]
 #define T_BR_STARTS "Heizung/Brenner_Starts_heute"
 #define T_BR_24H    "Heizung/Brenner_Anteil_24h"          // Brennerlaufzeit-Anteil letzte 24 h [%]
+#define T_WOHNZIMMER "sensor1/temperature"                 // Wohnzimmertemperatur [°C]
+#define WOHNZIMMER_MAX_AGE_MS 900000UL                     // älter als 15 min → grau
 
 // Heizung
 #define HEIZ_MAX_AGE_MS      120000    // Heizungsregelung sendet ca. alle 10 s
@@ -130,6 +132,8 @@ struct Werte {
   char     venusReset[20] = "";
   // Heizung
   float    tAussen = 0, tKessel = 0, tVorlauf = 0, tWW = 0;
+  float    tWohnzimmer = 0;
+  uint32_t tWohnzimmerZeit = 0;
   float    sollKessel = 0, sollVorlauf = 0, sollWW = 0;
   uint32_t relais = 0;
   uint32_t tHeiz = 0;
@@ -415,7 +419,7 @@ void handleMqtt() {
       const char* topics[] = {
         T_GRID, T_GEN, T_HB, T_GVALID, T_INV, T_RSSI, T_MQC, T_MBERR, T_BUPTIME,
         T_AKKU, T_SOC, T_AUTARKIE, T_VENUS, T_SOLL, LAMP_TOPIC_ONOFF, T_PV_HEUTE,
-        T_HEIZUNG, T_BR_ZEIT, T_BR_STARTS, T_BR_24H
+        T_HEIZUNG, T_BR_ZEIT, T_BR_STARTS, T_BR_24H, T_WOHNZIMMER
       };
       for (auto t : topics) mqttClient.subscribe(t);
       backoff = MQTT_BACKOFF_MIN;
@@ -526,6 +530,7 @@ void callbackMqttReceive(char* topic, byte* payload, unsigned int length) {
   else if (!strcmp(topic, T_BR_ZEIT))  { w.brennerH = v; w.tBrenner = now; }
   else if (!strcmp(topic, T_BR_STARTS)){ w.brennerStarts = lroundf(v); w.tBrenner = now; }
   else if (!strcmp(topic, T_BR_24H))   { w.brennerAnteil24 = v; w.brennerAnteil24Da = true; w.tBrenner = now; }
+  else if (!strcmp(topic, T_WOHNZIMMER)) { w.tWohnzimmer = v; w.tWohnzimmerZeit = now; }
 }
 
 // =============================================================================
@@ -923,6 +928,32 @@ static void drawHFeld(const HFeld& d, FieldState& st, const char* zahl, bool gra
   M5.Lcd.setTextSize(1);
 }
 
+// Oberes Feld der Heizungsseite: Außen links, Wohnzimmer rechts
+static void drawTemperaturFeld(const char* aussen, bool aussenGrad, uint16_t farbeAussen,
+                               const char* wohn, bool wohnGrad, uint16_t farbeWohn) {
+  char key[32];
+  snprintf(key, sizeof(key), "%s|%s|%u", aussen, wohn, farbeWohn);
+  if (strcmp(fsAussen.text, key) == 0 && fsAussen.textColor == farbeAussen) return;
+  strncpy(fsAussen.text, key, sizeof(fsAussen.text) - 1);
+  fsAussen.text[sizeof(fsAussen.text) - 1] = '\0';
+  fsAussen.textColor = farbeAussen;
+  fsAussen.border = TFT_DARKCYAN;
+
+  const HFeld& d = H_AUSSEN;
+  drawFieldShadow(d.x, d.y, d.w, d.h, d.r, d.shadow);
+  fillGradientRoundRect(d.x, d.y, d.w, d.h, d.r, d.gradStart, d.gradEnd);
+  drawFieldBorder(d.x, d.y, d.w, d.h, d.r, TFT_DARKCYAN);
+
+  M5.Lcd.setTextColor(TFT_BLACK);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.drawCentreString("Aussen", 85, 12, 2);
+  M5.Lcd.drawCentreString("Wohnzimmer", 235, 12, 2);
+  M5.Lcd.drawFastVLine(160, 14, 54, TFT_DARKCYAN);         // Trennlinie
+  drawWert(aussen, aussenGrad, 85, 36, 2, 2, farbeAussen);
+  drawWert(wohn, wohnGrad, 235, 36, 2, 2, farbeWohn);
+  M5.Lcd.setTextSize(1);
+}
+
 void drawHeizung() {
   const bool daten  = w.tHeiz != 0;
   const bool aktuell = frisch(w.tHeiz, HEIZ_MAX_AGE_MS);
@@ -931,10 +962,14 @@ void drawHeizung() {
   const bool speicherLad = w.relais & (1u << 4);              // R5 = Speicherladung Warmwasser
   char zahl[12], sub[24], soll[12];
 
-  // Außentemperatur
+  // Außen- und Wohnzimmertemperatur
+  char wohn[12];
+  const bool wohnDa      = w.tWohnzimmerZeit != 0;
+  const bool wohnAktuell = frisch(w.tWohnzimmerZeit, WOHNZIMMER_MAX_AGE_MS);
   if (daten) fmtKomma(zahl, sizeof(zahl), w.tAussen); else strcpy(zahl, "--");
+  if (wohnDa) fmtKomma(wohn, sizeof(wohn), w.tWohnzimmer); else strcpy(wohn, "--");
   if (feedbackUntil == 0) {                                  // Tasten-Rückmeldung nicht übermalen
-    drawHFeld(H_AUSSEN, fsAussen, zahl, daten, nullptr, TFT_DARKCYAN, farbe);
+    drawTemperaturFeld(zahl, daten, farbe, wohn, wohnDa, wohnAktuell ? TFT_BLACK : TFT_DARKGREY);
   }
 
   // Vorlauf Fußbodenheizung: rot, wenn deutlich unter Soll
