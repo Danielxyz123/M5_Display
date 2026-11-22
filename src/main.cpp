@@ -10,8 +10,10 @@
 //      Brenner heute (Laufzeit, Starts, Laufzeitanteil der letzten 24 h)
 //      Rahmen: Kessel orange = Brenner läuft, Warmwasser orange = Speicherladung,
 //      rot = Vorlauf bzw. Warmwasser deutlich unter Soll
-//   3. Wetter Melle: jetzt, die naechsten Stunden, 4 Tage mit Regen und PV-Prognose
+//   3. Wetter Melle: jetzt, die naechsten Stunden, heute und morgen mit Regen und PV-Prognose
 //      (Open-Meteo ueber das ioBroker-Skript WetterMqttDisplay)
+//      Glaette-Warnung (DWD oder eigene Abschaetzung): Kasten oben rechts,
+//      orange = moeglich, rot = wahrscheinlich / DWD-Warnung; auf der Heizungsseite "GLATT!"
 //      Seite 1, 2 und 3 wechseln automatisch alle 10 s
 //   4. Verlauf der letzten 60 min (Netz, PV, Akku)
 //   5. Diagnose (Bridge, Regelung, Venus-Controller, Display)
@@ -167,6 +169,8 @@ struct Wetter {
   uint8_t      nStunden = 0, nTage = 0;
   WetterStunde h[4];
   WetterTag    d[4];
+  int          glStufe = 0;            // 0 keine, 1 möglich, 2 wahrscheinlich/DWD, 3 DWD-Unwetter
+  char         glArt[20] = "", glZusatz[16] = "", glZeit[12] = "";
 } wet;
 bool wetterNeu = false;                // neue Daten → Seite neu zeichnen
 
@@ -534,6 +538,11 @@ static void verarbeiteWetter(byte* payload, unsigned int length) {
     d.code = e[1] | 0;  d.tmax = e[2] | 0.0f;  d.tmin = e[3] | 0.0f;
     d.mm = e[4] | 0.0f;  d.regenP = e[5] | 0;  d.pv = e[6] | -1.0f;
   }
+  JsonArrayConst g = doc["g"];
+  wet.glStufe = g.isNull() ? 0 : (g[0] | 0);
+  strncpy(wet.glArt,    g.isNull() ? "" : (g[1] | ""), sizeof(wet.glArt) - 1);
+  strncpy(wet.glZusatz, g.isNull() ? "" : (g[2] | ""), sizeof(wet.glZusatz) - 1);
+  strncpy(wet.glZeit,   g.isNull() ? "" : (g[3] | ""), sizeof(wet.glZeit) - 1);
   wet.t = millis();
   wetterNeu = true;
 }
@@ -991,9 +1000,9 @@ static void drawHFeld(const HFeld& d, FieldState& st, const char* zahl, bool gra
 
 // Oberes Feld der Heizungsseite: Außen links, Wohnzimmer rechts
 static void drawTemperaturFeld(const char* aussen, bool aussenGrad, uint16_t farbeAussen,
-                               const char* wohn, bool wohnGrad, uint16_t farbeWohn) {
+                               const char* wohn, bool wohnGrad, uint16_t farbeWohn, int glaette) {
   char key[32];
-  snprintf(key, sizeof(key), "%s|%s|%u", aussen, wohn, farbeWohn);
+  snprintf(key, sizeof(key), "%s|%s|%u|%d", aussen, wohn, farbeWohn, glaette);
   if (strcmp(fsAussen.text, key) == 0 && fsAussen.textColor == farbeAussen) return;
   strncpy(fsAussen.text, key, sizeof(fsAussen.text) - 1);
   fsAussen.text[sizeof(fsAussen.text) - 1] = '\0';
@@ -1007,7 +1016,13 @@ static void drawTemperaturFeld(const char* aussen, bool aussenGrad, uint16_t far
 
   M5.Lcd.setTextColor(TFT_BLACK);
   M5.Lcd.setTextSize(1);
-  M5.Lcd.drawCentreString("Aussen", 85, 12, 2);
+  if (glaette > 0) {                                       // Glätte-Warnung aus der Wetterseite
+    M5.Lcd.setTextColor(glaette >= 2 ? TFT_RED : TFT_MAROON);
+    M5.Lcd.drawCentreString("Aussen  GLATT!", 85, 12, 2);
+    M5.Lcd.setTextColor(TFT_BLACK);
+  } else {
+    M5.Lcd.drawCentreString("Aussen", 85, 12, 2);
+  }
   M5.Lcd.drawCentreString("Wohnzimmer", 235, 12, 2);
   M5.Lcd.drawFastVLine(160, 14, 54, TFT_DARKCYAN);         // Trennlinie
   drawWert(aussen, aussenGrad, 85, 36, 2, 2, farbeAussen);
@@ -1030,7 +1045,8 @@ void drawHeizung() {
   if (daten) fmtKomma(zahl, sizeof(zahl), w.tAussen); else strcpy(zahl, "--");
   if (wohnDa) fmtKomma(wohn, sizeof(wohn), w.tWohnzimmer); else strcpy(wohn, "--");
   if (feedbackUntil == 0) {                                  // Tasten-Rückmeldung nicht übermalen
-    drawTemperaturFeld(zahl, daten, farbe, wohn, wohnDa, wohnAktuell ? TFT_BLACK : TFT_DARKGREY);
+    const int glaette = frisch(wet.t, WETTER_MAX_AGE_MS) ? wet.glStufe : 0;
+    drawTemperaturFeld(zahl, daten, farbe, wohn, wohnDa, wohnAktuell ? TFT_BLACK : TFT_DARKGREY, glaette);
   }
 
   // Vorlauf Fußbodenheizung: rot, wenn deutlich unter Soll
@@ -1214,7 +1230,8 @@ void drawWetter(bool force) {
   if (!da) {
     M5.Lcd.setTextColor(TFT_LIGHTGREY);
     M5.Lcd.drawCentreString("Wetter: noch keine Daten", 160, 32, 2);
-    for (int i = 0; i < 4; i++) { wetterFeld(5 + i * 78, 82, 76, 58); wetterFeld(5 + i * 78, 145, 76, 90); }
+    for (int i = 0; i < 4; i++) wetterFeld(5 + i * 78, 82, 76, 58);
+    for (int i = 0; i < 2; i++) wetterFeld(5 + i * 156, 145, 154, 90);
     return;
   }
   wetterIcon(wet.code, wet.tag, 45, 41, 24);
@@ -1223,15 +1240,27 @@ void drawWetter(bool force) {
   M5.Lcd.setTextSize(1);
   M5.Lcd.setTextColor(aktuell ? TFT_LIGHTGREY : TFT_DARKGREY);
   M5.Lcd.drawCentreString(wetterText(wet.code), 145, 52, 2);
-  M5.Lcd.drawFastVLine(212, 14, 54, W_RAHMEN);
-  M5.Lcd.setTextColor(TFT_WHITE);
-  M5.Lcd.drawCentreString("Melle", 263, 12, 2);
-  snprintf(buf, sizeof(buf), "Wind %d km/h", wet.wind);
-  M5.Lcd.setTextColor(farbe);
-  M5.Lcd.drawCentreString(buf, 263, 33, 2);
-  snprintf(buf, sizeof(buf), "Stand %s", wet.stand);
-  M5.Lcd.setTextColor(aktuell ? TFT_LIGHTGREY : TFT_ORANGE);
-  M5.Lcd.drawCentreString(buf, 263, 56, 1);
+  if (aktuell && wet.glStufe > 0) {                        // Glätte-Warnung statt Ort/Wind
+    const uint16_t hg = wet.glStufe >= 2 ? TFT_RED : TFT_ORANGE;
+    M5.Lcd.fillRoundRect(214, 9, 96, 64, 6, hg);
+    if (wet.glStufe >= 3) M5.Lcd.drawRoundRect(215, 10, 94, 62, 5, TFT_WHITE);
+    M5.Lcd.setTextColor(wet.glStufe >= 2 ? TFT_WHITE : TFT_BLACK);
+    M5.Lcd.drawCentreString("GLAETTE!", 262, 11, 2);
+    const int fArt = M5.Lcd.textWidth(wet.glArt, 2) <= 92 ? 2 : 1;
+    M5.Lcd.drawCentreString(wet.glArt, 262, fArt == 2 ? 28 : 31, fArt);
+    M5.Lcd.drawCentreString(wet.glZusatz, 262, 47, 1);
+    M5.Lcd.drawCentreString(wet.glZeit, 262, 59, 1);
+  } else {
+    M5.Lcd.drawFastVLine(212, 14, 54, W_RAHMEN);
+    M5.Lcd.setTextColor(TFT_WHITE);
+    M5.Lcd.drawCentreString("Melle", 263, 12, 2);
+    snprintf(buf, sizeof(buf), "Wind %d km/h", wet.wind);
+    M5.Lcd.setTextColor(farbe);
+    M5.Lcd.drawCentreString(buf, 263, 33, 2);
+    snprintf(buf, sizeof(buf), "Stand %s", wet.stand);
+    M5.Lcd.setTextColor(aktuell ? TFT_LIGHTGREY : TFT_ORANGE);
+    M5.Lcd.drawCentreString(buf, 263, 56, 1);
+  }
 
   // Die nächsten Stunden
   for (int i = 0; i < 4; i++) {
@@ -1251,19 +1280,29 @@ void drawWetter(bool force) {
     }
   }
 
-  // Die nächsten Tage
-  for (int i = 0; i < 4; i++) {
-    const int x = 5 + i * 78, y = 145, cx = x + 38;
-    wetterFeld(x, y, 76, 90);
+  // Heute und morgen
+  for (int i = 0; i < 2; i++) {
+    const int x = 5 + i * 156, y = 145, ix = x + 36, cx = x + 110;
+    wetterFeld(x, y, 154, 90);
     if (i >= wet.nTage) continue;
     const WetterTag& d = wet.d[i];
     M5.Lcd.setTextColor(TFT_WHITE);
-    M5.Lcd.drawCentreString(d.name, cx, y + 4, 2);
-    wetterIcon(d.code, true, cx, y + 34, 15);
-    gradText(lroundf(d.tmax), cx - 4, y + 52, 2, aktuell ? TFT_ORANGE : TFT_DARKGREY, 2);
+    M5.Lcd.drawCentreString(i == 0 ? "Heute" : "Morgen", ix, y + 5, 2);
+    wetterIcon(d.code, true, ix, y + 50, 24);
+    M5.Lcd.setTextColor(aktuell ? TFT_LIGHTGREY : TFT_DARKGREY);
+    M5.Lcd.drawCentreString(wetterText(d.code), ix, y + 76, 1);
+    // Höchst- / Tiefstwert groß, bei sehr breiten Zahlen kleiner
+    char mx[8], mn[8];
+    snprintf(mx, sizeof(mx), "%d", (int)lroundf(d.tmax));
+    snprintf(mn, sizeof(mn), "%d", (int)lroundf(d.tmin));
+    const int fT = (M5.Lcd.textWidth(mx, 4) + M5.Lcd.textWidth(mn, 4) + 26 <= 80) ? 4 : 2;
+    const int wMx = M5.Lcd.textWidth(mx, fT) + 6, wSl = M5.Lcd.textWidth("/", fT) + 4;
+    const int wMn = M5.Lcd.textWidth(mn, fT) + 6;
+    const int x0 = cx - (wMx + wSl + wMn) / 2, yT = y + (fT == 4 ? 7 : 12);
+    gradText(lroundf(d.tmax), x0, yT, fT, aktuell ? TFT_ORANGE : TFT_DARKGREY, 0);
     M5.Lcd.setTextColor(TFT_LIGHTGREY);
-    M5.Lcd.drawCentreString("/", cx, y + 52, 2);
-    gradText(lroundf(d.tmin), cx + 5, y + 52, 2, aktuell ? TFT_CYAN : TFT_DARKGREY, 0);
+    M5.Lcd.drawString("/", x0 + wMx + 2, yT, fT);
+    gradText(lroundf(d.tmin), x0 + wMx + wSl, yT, fT, aktuell ? TFT_CYAN : TFT_DARKGREY, 0);
     if (d.mm >= 0.1f) {
       char mm[10];
       fmtKomma(mm, sizeof(mm), d.mm);
@@ -1273,11 +1312,11 @@ void drawWetter(bool force) {
       snprintf(buf, sizeof(buf), "trocken");
       M5.Lcd.setTextColor(TFT_DARKGREY);
     }
-    M5.Lcd.drawCentreString(buf, cx, y + 70, 1);
+    M5.Lcd.drawCentreString(buf, cx, y + 42, 2);
     if (d.pv >= 0) {
       snprintf(buf, sizeof(buf), "PV %d kWh", (int)lroundf(d.pv));
       M5.Lcd.setTextColor(TFT_YELLOW);
-      M5.Lcd.drawCentreString(buf, cx, y + 80, 1);
+      M5.Lcd.drawCentreString(buf, cx, y + 64, 2);
     }
   }
 }
