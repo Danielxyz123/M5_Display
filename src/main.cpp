@@ -18,8 +18,10 @@
 //   4. Verlauf der letzten 60 min (Netz, PV, Akku)
 //   5. Diagnose (Bridge, Regelung, Venus-Controller, Display)
 //
-// Tasten:  kurz (beim Loslassen):  A = Lampe an/aus   B = heller      C = dunkler
-//          halten:   A 1,5 s = nächste Seite   B 3 s = Testmodus   C 3 s = Display dimmen
+// Tasten:  Klick (beim Loslassen):  A = Seite zurueck   B = Lampe an/aus   C = Seite vor
+//          halten:  A = Lampe dunkler, C = Lampe heller (wiederholt, solange gehalten)
+//                   B 3 s = Display dimmen,  A + C 3 s = Testmodus
+//          Nach manuellem Seitenwechsel bleibt die Seite 1 min stehen.
 // =============================================================================
 
 #include <M5Stack.h>
@@ -55,8 +57,9 @@
 #define MQTT_BACKOFF_MIN     1000
 #define MQTT_BACKOFF_MAX     30000
 #define MQTT_PACKET_SIZE     2048      // Venus-JSON ist ca. 1 KB
-#define LONG_PRESS_MS        3000      // so lange halten für Testmodus (B) und Dimmen (C)
-#define PAGE_PRESS_MS        1500      // so lange Taste A halten für den Seitenwechsel
+#define LONG_PRESS_MS        3000      // so lange halten: B = Display dimmen, A + C = Testmodus
+#define KLICK_MAX_MS         500       // kürzer = Klick, länger gehalten = Lampe dimmen
+#define DIMM_INTERVALL_MS    400       // beim Halten alle 400 ms eine Helligkeitsstufe
 #define FEEDBACK_MS          800
 #define BRIGHT_NORMAL        100
 #define BRIGHT_DIM           10
@@ -116,7 +119,7 @@
 #define SEITEN               5
 #define AUTO_SEITEN          3         // Solar → Heizung → Wetter wechseln automatisch
 #define AUTO_WECHSEL_MS      10000
-#define AUTO_RUECKKEHR_MS    120000    // von Verlauf/Diagnose zurück in den Wechsel
+#define MANUELL_HALTEN_MS    60000     // manuell gewählte Seite so lange stehen lassen
 
 // === LAMPE STEUERUNG ÜBER TASTEN ===
 #define LAMP_TOPIC_ONOFF        "lampe/wohnzimmer/set"            // ioBroker: ON / OFF (retained)
@@ -313,7 +316,7 @@ void setup() {
 
   forceRedraw = true;
   DEBUG_PRINT(F("Setup complete.\n"));
-  DEBUG_PRINT(F("kurz: A=Lampe B=heller C=dunkler | halten: A 1,5 s=Seite, B 3 s=Test, C 3 s=Dimmen\n"));
+  DEBUG_PRINT(F("Klick: A=zurueck B=Lampe C=vor | halten: A=dunkler C=heller, B 3 s=Display dimmen, A+C 3 s=Test\n"));
 }
 
 // =============================================================================
@@ -614,88 +617,100 @@ static void zeigeFeedback(const char* text, uint16_t color, uint8_t font) {
   feedbackUntil = millis() + FEEDBACK_MS;
 }
 
-// Wertet eine Taste aus:
-//   TASTE_LANG  sobald sie LONG_PRESS_MS gehalten wird (noch während des Haltens, einmalig)
-//   TASTE_KURZ  beim Loslassen (negative Flanke), wenn sie kürzer gehalten wurde
-//   TASTE_NICHTS sonst (auch beim Loslassen nach einem langen Druck)
-enum TastenEreignis { TASTE_NICHTS, TASTE_KURZ, TASTE_LANG };
-
-static TastenEreignis tasteAuswerten(Button& taste, bool& langErledigt, uint32_t langMs = LONG_PRESS_MS) {
-  if (!langErledigt && taste.pressedFor(langMs)) {
-    langErledigt = true;
-    return TASTE_LANG;
-  }
-  if (taste.wasReleased()) {
-    const bool warLang = langErledigt;
-    langErledigt = false;
-    return warLang ? TASTE_NICHTS : TASTE_KURZ;
-  }
-  return TASTE_NICHTS;
-}
-
-// Automatischer Wechsel Solar → Heizung → Wetter; von Verlauf/Diagnose nach einer Weile zurück
+// Automatischer Wechsel Solar → Heizung → Wetter.
+// Nach einem Tastendruck bleibt die Seite MANUELL_HALTEN_MS stehen; Verlauf/Diagnose kehren
+// danach zur Solarseite zurück.
 void handleAutoWechsel() {
   const uint32_t now = millis();
+  if (lastButton != 0 && now - lastButton < MANUELL_HALTEN_MS) return;
+  if (M5.BtnA.isPressed() || M5.BtnB.isPressed() || M5.BtnC.isPressed() || feedbackUntil != 0) return;
   if (page < AUTO_SEITEN) {
-    if (now - lastPageSwitch >= AUTO_WECHSEL_MS && feedbackUntil == 0 &&
-        !M5.BtnA.isPressed() && !M5.BtnB.isPressed() && !M5.BtnC.isPressed()) {
+    if (now - lastPageSwitch >= AUTO_WECHSEL_MS) {
       page = (page + 1) % AUTO_SEITEN;
       lastPageSwitch = now;
       forceRedraw = true;
     }
-  } else if (now - lastButton >= AUTO_RUECKKEHR_MS) {
+  } else {
     page = SEITE_SOLAR;
     lastPageSwitch = now;
     forceRedraw = true;
   }
 }
 
+static void seiteWechseln(int schritt) {
+  page = (page + SEITEN + schritt) % SEITEN;
+  lastPageSwitch = millis();
+  forceRedraw = true;
+}
+
+static void lampeDimmen(bool heller) {
+  mqttClient.publish(LAMP_TOPIC_BRIGHTNESS, heller ? "+10" : "-10", false);
+  zeigeFeedback(heller ? "+" : "-", TFT_WHITE, 4);
+}
+
+// Seitentaste (A oder C): Klick = blättern, Halten = Lampe dimmen (wiederholt)
+struct SeitenTaste {
+  bool     gedimmt = false;            // in diesem Druck schon gedimmt → kein Klick mehr
+  uint32_t naechstesDimmen = 0;
+};
+
+static void seitenTaste(Button& taste, SeitenTaste& st, int schritt, bool heller, bool gesperrt) {
+  const uint32_t now = millis();
+  if (taste.wasPressed()) {
+    st.gedimmt = false;
+    st.naechstesDimmen = now + KLICK_MAX_MS;
+  }
+  if (taste.isPressed() && !gesperrt && (int32_t)(now - st.naechstesDimmen) >= 0) {
+    lampeDimmen(heller);
+    st.gedimmt = true;
+    st.naechstesDimmen = now + DIMM_INTERVALL_MS;
+  }
+  if (taste.wasReleased()) {
+    if (!st.gedimmt && !gesperrt) seiteWechseln(schritt);
+    st.gedimmt = false;
+  }
+}
+
 void handleButtons() {
-  static bool langA = false, langB = false, langC = false;
+  static SeitenTaste tA, tC;
+  static bool langB = false;
+  static bool kombi = false;           // A und C zusammen gedrückt → kein Klick, kein Dimmen
+  static bool kombiErledigt = false;
+
   if (M5.BtnA.isPressed() || M5.BtnB.isPressed() || M5.BtnC.isPressed()) {
     lastButton = millis();
   }
 
-  // A (links): kurz = Lampe an/aus, 1,5 s halten = nächste Seite
-  switch (tasteAuswerten(M5.BtnA, langA, PAGE_PRESS_MS)) {
-    case TASTE_KURZ:
-      lampOn = !lampOn;
-      mqttClient.publish(LAMP_TOPIC_ONOFF, lampOn ? "ON" : "OFF", true);   // retained
-      zeigeFeedback(lampOn ? "AN" : "AUS", lampOn ? TFT_GREEN : TFT_RED, 2);
-      break;
-    case TASTE_LANG:
-      page = (page + 1) % SEITEN;
-      lastPageSwitch = millis();
-      forceRedraw = true;
-      break;
-    default: break;
-  }
-
-  // B (Mitte): kurz = Lampe heller, 3 s halten = Testmodus an/aus
-  switch (tasteAuswerten(M5.BtnB, langB)) {
-    case TASTE_KURZ:
-      mqttClient.publish(LAMP_TOPIC_BRIGHTNESS, "+10", false);
-      zeigeFeedback("+", TFT_WHITE, 4);
-      break;
-    case TASTE_LANG:
+  // A + C zusammen: 3 s halten = Testmodus an/aus
+  if (M5.BtnA.isPressed() && M5.BtnC.isPressed()) {
+    kombi = true;
+    if (!kombiErledigt && M5.BtnA.pressedFor(LONG_PRESS_MS) && M5.BtnC.pressedFor(LONG_PRESS_MS)) {
+      kombiErledigt = true;
       testMode = !testMode;
       DEBUG_PRINTF("Testmodus: %s\n", testMode ? "AN" : "AUS");
       forceRedraw = true;
-      break;
-    default: break;
+    }
   }
 
-  // C (rechts): kurz = Lampe dunkler, 3 s halten = Display dimmen
-  switch (tasteAuswerten(M5.BtnC, langC)) {
-    case TASTE_KURZ:
-      mqttClient.publish(LAMP_TOPIC_BRIGHTNESS, "-10", false);
-      zeigeFeedback("-", TFT_WHITE, 4);
-      break;
-    case TASTE_LANG:
-      dimmed = !dimmed;
-      M5.Lcd.setBrightness(dimmed ? BRIGHT_DIM : BRIGHT_NORMAL);
-      break;
-    default: break;
+  // A (links): Klick = Seite zurück, halten = Lampe dunkler
+  seitenTaste(M5.BtnA, tA, -1, false, kombi);
+  // C (rechts): Klick = Seite vor, halten = Lampe heller
+  seitenTaste(M5.BtnC, tC, +1, true, kombi);
+  if (!M5.BtnA.isPressed() && !M5.BtnC.isPressed()) { kombi = false; kombiErledigt = false; }
+
+  // B (Mitte): Klick = Lampe an/aus, 3 s halten = Display dimmen
+  if (!langB && M5.BtnB.pressedFor(LONG_PRESS_MS)) {
+    langB = true;
+    dimmed = !dimmed;
+    M5.Lcd.setBrightness(dimmed ? BRIGHT_DIM : BRIGHT_NORMAL);
+  }
+  if (M5.BtnB.wasReleased()) {
+    if (!langB) {
+      lampOn = !lampOn;
+      mqttClient.publish(LAMP_TOPIC_ONOFF, lampOn ? "ON" : "OFF", true);   // retained
+      zeigeFeedback(lampOn ? "AN" : "AUS", lampOn ? TFT_GREEN : TFT_RED, 2);
+    }
+    langB = false;
   }
 }
 
@@ -1094,6 +1109,7 @@ void drawHeizung() {
 #define W_FELD   0x18E3                // Hintergrund der Wetterfelder (dunkelgrau-blau)
 #define W_RAHMEN TFT_DARKCYAN
 #define W_REGEN  0x5D9F                // hellblau
+#define W_ORANGE 0xFB00                // kraeftiges Orange (TFT_ORANGE wirkt auf dem Panel gelb)
 
 static void wetterFeld(int x, int y, int wd, int ht) {
   M5.Lcd.fillRoundRect(x, y, wd, ht, 8, W_FELD);
@@ -1241,7 +1257,7 @@ void drawWetter(bool force) {
   M5.Lcd.setTextColor(aktuell ? TFT_LIGHTGREY : TFT_DARKGREY);
   M5.Lcd.drawCentreString(wetterText(wet.code), 145, 52, 2);
   if (aktuell && wet.glStufe > 0) {                        // Glätte-Warnung statt Ort/Wind
-    const uint16_t hg = wet.glStufe >= 2 ? TFT_RED : TFT_ORANGE;
+    const uint16_t hg = wet.glStufe >= 2 ? TFT_RED : W_ORANGE;
     M5.Lcd.fillRoundRect(214, 9, 96, 64, 6, hg);
     if (wet.glStufe >= 3) M5.Lcd.drawRoundRect(215, 10, 94, 62, 5, TFT_WHITE);
     M5.Lcd.setTextColor(wet.glStufe >= 2 ? TFT_WHITE : TFT_BLACK);
@@ -1299,7 +1315,7 @@ void drawWetter(bool force) {
     const int wMx = M5.Lcd.textWidth(mx, fT) + 6, wSl = M5.Lcd.textWidth("/", fT) + 4;
     const int wMn = M5.Lcd.textWidth(mn, fT) + 6;
     const int x0 = cx - (wMx + wSl + wMn) / 2, yT = y + (fT == 4 ? 7 : 12);
-    gradText(lroundf(d.tmax), x0, yT, fT, aktuell ? TFT_ORANGE : TFT_DARKGREY, 0);
+    gradText(lroundf(d.tmax), x0, yT, fT, aktuell ? W_ORANGE : TFT_DARKGREY, 0);
     M5.Lcd.setTextColor(TFT_LIGHTGREY);
     M5.Lcd.drawString("/", x0 + wMx + 2, yT, fT);
     gradText(lroundf(d.tmin), x0 + wMx + wSl, yT, fT, aktuell ? TFT_CYAN : TFT_DARKGREY, 0);
