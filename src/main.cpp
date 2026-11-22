@@ -1,7 +1,7 @@
 // =============================================================================
 // M5Stack-Display für PV / Netz / Venus-Speicher
 // =============================================================================
-// Seiten (Taste A 1,5 s halten blättert):
+// Seiten (A/C blaettern; Verlauf und Diagnose erst nach langem Druck auf B):
 //   1. Übersicht: PV (Leistung und Tagesertrag), Netz, Akku, Ladestand, Autarkie
 //      Rahmenfarbe Akku: grün = lädt, orange = entlädt, grau = Stand-by/voll,
 //                        rot = Störung am Venus (kein Sollwert, Modbus, keine Daten)
@@ -20,8 +20,11 @@
 //
 // Tasten:  Klick (beim Loslassen):  A = Seite zurueck   B = Lampe an/aus   C = Seite vor
 //          halten:  A = Lampe dunkler, C = Lampe heller (wiederholt, solange gehalten)
-//                   B 3 s = Display dimmen,  A + C 3 s = Testmodus
-//          Nach manuellem Seitenwechsel bleibt die Seite 1 min stehen.
+//                   B 1,5 s = Verlauf/Diagnose freigeben (springt zur Diagnose; dort: Testmodus)
+//                   A + C 3 s = Display dimmen
+//          A/C blaettern nur durch Solar, Heizung, Wetter; nach Freigabe durch alle Seiten.
+//          Nach manuellem Seitenwechsel bleibt die Seite 1 min stehen, danach endet auch
+//          die Freigabe von Verlauf/Diagnose.
 // =============================================================================
 
 #include <M5Stack.h>
@@ -57,7 +60,8 @@
 #define MQTT_BACKOFF_MIN     1000
 #define MQTT_BACKOFF_MAX     30000
 #define MQTT_PACKET_SIZE     2048      // Venus-JSON ist ca. 1 KB
-#define LONG_PRESS_MS        3000      // so lange halten: B = Display dimmen, A + C = Testmodus
+#define LONG_PRESS_MS        3000      // so lange A + C halten: Display dimmen
+#define DIAG_PRESS_MS        1500      // so lange B halten: Verlauf/Diagnose freigeben
 #define KLICK_MAX_MS         500       // kürzer = Klick, länger gehalten = Lampe dimmen
 #define DIMM_INTERVALL_MS    400       // beim Halten alle 400 ms eine Helligkeitsstufe
 #define FEEDBACK_MS          800
@@ -316,7 +320,7 @@ void setup() {
 
   forceRedraw = true;
   DEBUG_PRINT(F("Setup complete.\n"));
-  DEBUG_PRINT(F("Klick: A=zurueck B=Lampe C=vor | halten: A=dunkler C=heller, B 3 s=Display dimmen, A+C 3 s=Test\n"));
+  DEBUG_PRINT(F("Klick: A=zurueck B=Lampe C=vor | halten: A=dunkler C=heller, B 1,5 s=Diagnose, A+C 3 s=Display dimmen\n"));
 }
 
 // =============================================================================
@@ -617,13 +621,16 @@ static void zeigeFeedback(const char* text, uint16_t color, uint8_t font) {
   feedbackUntil = millis() + FEEDBACK_MS;
 }
 
+bool diagFrei = false;                 // Verlauf/Diagnose per langem B freigegeben
+
 // Automatischer Wechsel Solar → Heizung → Wetter.
-// Nach einem Tastendruck bleibt die Seite MANUELL_HALTEN_MS stehen; Verlauf/Diagnose kehren
-// danach zur Solarseite zurück.
+// Nach einem Tastendruck bleibt die Seite MANUELL_HALTEN_MS stehen; danach endet die Freigabe
+// von Verlauf/Diagnose und es geht zur Solarseite zurück.
 void handleAutoWechsel() {
   const uint32_t now = millis();
   if (lastButton != 0 && now - lastButton < MANUELL_HALTEN_MS) return;
   if (M5.BtnA.isPressed() || M5.BtnB.isPressed() || M5.BtnC.isPressed() || feedbackUntil != 0) return;
+  diagFrei = false;
   if (page < AUTO_SEITEN) {
     if (now - lastPageSwitch >= AUTO_WECHSEL_MS) {
       page = (page + 1) % AUTO_SEITEN;
@@ -638,7 +645,9 @@ void handleAutoWechsel() {
 }
 
 static void seiteWechseln(int schritt) {
-  page = (page + SEITEN + schritt) % SEITEN;
+  const int n = diagFrei ? SEITEN : AUTO_SEITEN;           // ohne Freigabe nur Solar/Heizung/Wetter
+  if (page >= n) page = SEITE_SOLAR;
+  page = (page + n + schritt) % n;
   lastPageSwitch = millis();
   forceRedraw = true;
 }
@@ -681,14 +690,13 @@ void handleButtons() {
     lastButton = millis();
   }
 
-  // A + C zusammen: 3 s halten = Testmodus an/aus
+  // A + C zusammen: 3 s halten = Display dimmen
   if (M5.BtnA.isPressed() && M5.BtnC.isPressed()) {
     kombi = true;
     if (!kombiErledigt && M5.BtnA.pressedFor(LONG_PRESS_MS) && M5.BtnC.pressedFor(LONG_PRESS_MS)) {
       kombiErledigt = true;
-      testMode = !testMode;
-      DEBUG_PRINTF("Testmodus: %s\n", testMode ? "AN" : "AUS");
-      forceRedraw = true;
+      dimmed = !dimmed;
+      M5.Lcd.setBrightness(dimmed ? BRIGHT_DIM : BRIGHT_NORMAL);
     }
   }
 
@@ -698,11 +706,19 @@ void handleButtons() {
   seitenTaste(M5.BtnC, tC, +1, true, kombi);
   if (!M5.BtnA.isPressed() && !M5.BtnC.isPressed()) { kombi = false; kombiErledigt = false; }
 
-  // B (Mitte): Klick = Lampe an/aus, 3 s halten = Display dimmen
-  if (!langB && M5.BtnB.pressedFor(LONG_PRESS_MS)) {
+  // B (Mitte): Klick = Lampe an/aus, 1,5 s halten = Verlauf/Diagnose freigeben und zur Diagnose;
+  // auf der Diagnoseseite schaltet langes B den Testmodus
+  if (!langB && M5.BtnB.pressedFor(DIAG_PRESS_MS)) {
     langB = true;
-    dimmed = !dimmed;
-    M5.Lcd.setBrightness(dimmed ? BRIGHT_DIM : BRIGHT_NORMAL);
+    if (page == SEITE_DIAGNOSE) {
+      testMode = !testMode;
+      DEBUG_PRINTF("Testmodus: %s\n", testMode ? "AN" : "AUS");
+    } else {
+      diagFrei = true;
+      page = SEITE_DIAGNOSE;
+      lastPageSwitch = millis();
+    }
+    forceRedraw = true;
   }
   if (M5.BtnB.wasReleased()) {
     if (!langB) {
