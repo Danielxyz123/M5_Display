@@ -165,12 +165,13 @@ struct FieldState {                    // zuletzt gezeichneter Zustand eines Fel
   uint16_t textColor;
 };
 // Wettervorhersage
-struct WetterStunde { int std; float temp; int code; int regenP; bool tag; };
+struct WetterStunde { int std; float temp; int code; int regenP; bool tag; float mm; };   // mm = l/m²
 struct WetterTag    { char name[8]; int code; float tmax, tmin, mm; int regenP; float pv; };
 struct Wetter {
   uint32_t     t = 0;                  // Empfangszeit
   char         stand[8] = "";
   float        temp = 0;
+  float        regen1h = 0;            // Regen in der kommenden Stunde [l/m²]
   int          code = 0, wind = 0;
   bool         tag = true;
   uint8_t      nStunden = 0, nTage = 0;
@@ -529,12 +530,13 @@ static void verarbeiteWetter(byte* payload, unsigned int length) {
   wet.code = n[1] | 0;
   wet.wind = n[2] | 0;
   wet.tag  = (n[3] | 1) != 0;
+  wet.regen1h = n[4] | 0.0f;
   wet.nStunden = 0;
   for (JsonArrayConst e : doc["h"].as<JsonArrayConst>()) {
     if (wet.nStunden >= 4) break;
     WetterStunde& h = wet.h[wet.nStunden++];
     h.std = e[0] | 0;  h.temp = e[1] | 0.0f;  h.code = e[2] | 0;
-    h.regenP = e[3] | 0;  h.tag = (e[4] | 1) != 0;
+    h.regenP = e[3] | 0;  h.tag = (e[4] | 1) != 0;  h.mm = e[5] | 0.0f;
   }
   wet.nTage = 0;
   for (JsonArrayConst e : doc["d"].as<JsonArrayConst>()) {
@@ -1245,6 +1247,21 @@ static void gradText(int v, int x, int y, int font, uint16_t farbe, uint8_t ausr
   M5.Lcd.drawCircle(x0 + wz - 2, y + 3, 2, farbe);
 }
 
+// Text mit Einheit l/m² zentriert (die Schriften haben kein ², deshalb kleine hochgestellte 2)
+static void lm2Text(const char* text, int cx, int y, int font, uint16_t farbe) {
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%s l/m", text);
+  const int w  = M5.Lcd.textWidth(buf, font);
+  const int x0 = cx - (w + 6) / 2;
+  M5.Lcd.setTextColor(farbe);
+  M5.Lcd.drawString(buf, x0, y, font);
+  M5.Lcd.drawString("2", x0 + w + 1, font == 1 ? y - 3 : y - 1, 1);
+}
+
+static bool istSchnee(int code) {
+  return (code >= 71 && code <= 77) || code == 85 || code == 86;
+}
+
 void drawWetter(bool force) {
   static bool warAktuell = false;
   const bool da = wet.t != 0;
@@ -1270,8 +1287,15 @@ void drawWetter(bool force) {
   fmtKomma(buf, sizeof(buf), wet.temp);
   drawWert(buf, true, 145, 14, 2, 2, farbe);
   M5.Lcd.setTextSize(1);
-  M5.Lcd.setTextColor(aktuell ? TFT_LIGHTGREY : TFT_DARKGREY);
-  M5.Lcd.drawCentreString(wetterText(wet.code), 145, 52, 2);
+  if (wet.regen1h >= 0.1f) {                               // Niederschlag in der kommenden Stunde
+    char mm[10];
+    fmtKomma(mm, sizeof(mm), wet.regen1h);
+    snprintf(buf, sizeof(buf), "%s %s", istSchnee(wet.code) ? "Schnee" : "Regen", mm);
+    lm2Text(buf, 145, 52, 2, aktuell ? W_REGEN : TFT_DARKGREY);
+  } else {
+    M5.Lcd.setTextColor(aktuell ? TFT_LIGHTGREY : TFT_DARKGREY);
+    M5.Lcd.drawCentreString(wetterText(wet.code), 145, 52, 2);
+  }
   if (aktuell && wet.glStufe > 0) {                        // Glätte-Warnung statt Ort/Wind
     const uint16_t hg = wet.glStufe >= 2 ? TFT_RED : W_ORANGE;
     M5.Lcd.fillRoundRect(214, 9, 96, 64, 6, hg);
@@ -1303,9 +1327,13 @@ void drawWetter(bool force) {
     snprintf(buf, sizeof(buf), "%d Uhr", h.std);
     M5.Lcd.setTextColor(TFT_LIGHTGREY);
     M5.Lcd.drawCentreString(buf, cx, y + 4, 2);
-    wetterIcon(h.code, h.tag, x + 21, y + 38, 13);
+    wetterIcon(h.code, h.tag, x + 19, y + 38, 12);
     gradText(lroundf(h.temp), x + 54, y + 24, 2, farbe, 1);
-    if (h.regenP >= 10) {
+    if (h.mm >= 0.1f) {                                    // Menge seit dem vorigen Feld
+      char mm[10];
+      fmtKomma(mm, sizeof(mm), h.mm);
+      lm2Text(mm, x + 53, y + 44, 1, W_REGEN);
+    } else if (h.regenP >= 10) {
       snprintf(buf, sizeof(buf), "%d%%", h.regenP);
       M5.Lcd.setTextColor(W_REGEN);
       M5.Lcd.drawCentreString(buf, x + 54, y + 43, 1);
@@ -1338,13 +1366,11 @@ void drawWetter(bool force) {
     if (d.mm >= 0.1f) {
       char mm[10];
       fmtKomma(mm, sizeof(mm), d.mm);
-      snprintf(buf, sizeof(buf), "%s mm %d%%", mm, d.regenP);
-      M5.Lcd.setTextColor(W_REGEN);
+      lm2Text(mm, cx, y + 42, 2, W_REGEN);
     } else {
-      snprintf(buf, sizeof(buf), "trocken");
       M5.Lcd.setTextColor(TFT_DARKGREY);
+      M5.Lcd.drawCentreString("trocken", cx, y + 42, 2);
     }
-    M5.Lcd.drawCentreString(buf, cx, y + 42, 2);
     if (d.pv >= 0) {
       snprintf(buf, sizeof(buf), "PV %d kWh", (int)lroundf(d.pv));
       M5.Lcd.setTextColor(TFT_YELLOW);
