@@ -101,6 +101,7 @@
 #define T_VENUS     "Venus-control"
 #define T_SOLL      "Ven_Neu/powerNeu"
 #define T_ONLINE    "M5Display/online"
+#define T_SMILEY    "M5Display/smiley"                    // beliebige Nachricht (nicht retained) → Smiley sofort
 #define T_DIAG      "M5Display/diag"                      // JSON: RSSI, AP, Abbrueche, Gruende
 #define T_HEIZUNG   "oeg_kmsd/state"                      // Heizungsregelung OEG KMS-D (JSON, ca. alle 10 s)
 #define T_BR_ZEIT   "Heizung/Brenner_Laufzeit_heute"      // vom ioBroker-Skript gespiegelt [h]
@@ -124,7 +125,13 @@
 #define SEITE_VERLAUF        3
 #define SEITE_DIAGNOSE       4
 #define SEITEN               5
+#define SEITE_SMILEY         5         // Gute-Laune-Einblendung, nicht per Taste erreichbar
 #define AUTO_SEITEN          3         // Solar → Heizung → Wetter wechseln automatisch
+#define SMILEY_VON_MIN       (6 * 60)        // morgens ab 6:00 ...
+#define SMILEY_BIS_MIN       (10 * 60)       // ... bis 10:00
+#define SMILEY_ABSTAND_MS    180000    // höchstens alle 3 min einblenden
+#define SMILEY_DAUER_MS      6000      // so lange stehen lassen
+#define ZEITZONE             "CET-1CEST,M3.5.0,M10.5.0/3"
 #define AUTO_WECHSEL_MS      10000
 #define MANUELL_HALTEN_MS    60000     // manuell gewählte Seite so lange stehen lassen
 
@@ -240,6 +247,14 @@ void drawWetter(bool force);
 void handleAutoWechsel();
 void drawHistory();
 void drawDiagnose();
+void drawSmiley();
+void zeigeSmileyJetzt();
+void animSmiley();
+void starteSmileyDemo();
+bool smileyDemoWeiter();
+uint8_t smileyDemo = 0;                // 0 aus, 1..3 = normal, kalt, heiß
+#define SERIEN_KLICK_MS 600            // Abstand zwischen Klicks einer Serie
+void smileyBefehl(const byte* p, unsigned int len);
 void drawFieldShadow(int x, int y, int w, int h, int radius, uint16_t shadowColor);
 void drawFieldBorder(int x, int y, int w, int h, int radius, uint16_t borderColor);
 void fillGradientRoundRect(int x, int y, int w, int h, int radius, uint16_t colorStart, uint16_t colorEnd);
@@ -363,6 +378,7 @@ void setup() {
   }
 
   initWifi();
+  configTzTime(ZEITZONE, "de.pool.ntp.org", "pool.ntp.org");   // Uhrzeit für den Morgen-Smiley
   mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
   mqttClient.setBufferSize(MQTT_PACKET_SIZE);
   mqttClient.setKeepAlive(30);
@@ -448,6 +464,7 @@ void loop() {
     updateTimeOld = millis();
     ORT(7); drawPage();
   }
+  if (page == SEITE_SMILEY && !forceRedraw) animSmiley();
   ORT(0);
   yield();
 }
@@ -532,7 +549,7 @@ void handleMqtt() {
       const char* topics[] = {
         T_GRID, T_GEN, T_HB, T_GVALID, T_INV, T_RSSI, T_MQC, T_MBERR, T_BUPTIME,
         T_AKKU, T_SOC, T_AUTARKIE, T_VENUS, T_SOLL, LAMP_TOPIC_ONOFF, T_PV_HEUTE,
-        T_HEIZUNG, T_BR_ZEIT, T_BR_STARTS, T_BR_24H, T_WOHNZIMMER, T_WETTER
+        T_HEIZUNG, T_BR_ZEIT, T_BR_STARTS, T_BR_24H, T_WOHNZIMMER, T_WETTER, T_SMILEY
       };
       for (auto t : topics) mqttClient.subscribe(t);
       backoff = MQTT_BACKOFF_MIN;
@@ -670,6 +687,10 @@ void callbackMqttReceive(char* topic, byte* payload, unsigned int length) {
     verarbeiteHeizung(payload, length);
     return;
   }
+  if (strcmp(topic, T_SMILEY) == 0) {
+    smileyBefehl(payload, length);
+    return;
+  }
 
   char msg[32] = {0};
   if (length >= sizeof(msg)) length = sizeof(msg) - 1;
@@ -729,14 +750,51 @@ bool diagFrei = false;                 // Verlauf/Diagnose per langem B freigege
 // Automatischer Wechsel Solar → Heizung → Wetter.
 // Nach einem Tastendruck bleibt die Seite MANUELL_HALTEN_MS stehen; danach endet die Freigabe
 // von Verlauf/Diagnose und es geht zur Solarseite zurück.
+uint8_t  smileyNach = SEITE_SOLAR;     // dorthin geht es nach dem Smiley weiter
+uint32_t tSmiley = 0;
+uint16_t smileyNr = 0;                 // wechselt Spruch und Zwinkern
+
+static bool istMorgens() {
+  struct tm t;
+  if (!getLocalTime(&t, 0)) return false;                 // noch keine Uhrzeit vom NTP
+  const int min = t.tm_hour * 60 + t.tm_min;
+  return min >= SMILEY_VON_MIN && min < SMILEY_BIS_MIN;
+}
+
+void zeigeSmileyJetzt() {
+  if (page == SEITE_SMILEY) return;
+  smileyNach = page < AUTO_SEITEN ? page : SEITE_SOLAR;
+  page = SEITE_SMILEY;
+  lastPageSwitch = millis();
+  smileyNr++;
+  forceRedraw = true;
+}
+
 void handleAutoWechsel() {
   const uint32_t now = millis();
+  if (page == SEITE_SMILEY) {                             // Smiley endet auch bei Tastendruck nach Ablauf
+    if (now - lastPageSwitch >= SMILEY_DAUER_MS && smileyDemoWeiter()) {
+      lastPageSwitch = now;
+      forceRedraw = true;
+    } else if (now - lastPageSwitch >= SMILEY_DAUER_MS) {
+      page = smileyNach;
+      lastPageSwitch = now;
+      forceRedraw = true;
+    }
+    return;
+  }
   if (lastButton != 0 && now - lastButton < MANUELL_HALTEN_MS) return;
   if (M5.BtnA.isPressed() || M5.BtnB.isPressed() || M5.BtnC.isPressed() || feedbackUntil != 0) return;
   diagFrei = false;
   if (page < AUTO_SEITEN) {
     if (now - lastPageSwitch >= AUTO_WECHSEL_MS) {
       page = (page + 1) % AUTO_SEITEN;
+      if ((tSmiley == 0 || now - tSmiley >= SMILEY_ABSTAND_MS) && istMorgens()) {
+        smileyNach = page;
+        page = SEITE_SMILEY;
+        tSmiley = now;
+        smileyNr++;
+      }
       lastPageSwitch = now;
       forceRedraw = true;
     }
@@ -751,6 +809,7 @@ static void seiteWechseln(int schritt) {
   const int n = diagFrei ? SEITEN : AUTO_SEITEN;           // ohne Freigabe nur Solar/Heizung/Wetter
   if (page >= n) page = SEITE_SOLAR;
   page = (page + n + schritt) % n;
+  smileyDemo = 0;                                          // manuelles Blättern beendet die Demo
   lastPageSwitch = millis();
   forceRedraw = true;
 }
@@ -764,6 +823,8 @@ static void lampeDimmen(bool heller) {
 struct SeitenTaste {
   bool     gedimmt = false;            // in diesem Druck schon gedimmt → kein Klick mehr
   uint32_t naechstesDimmen = 0;
+  uint8_t  klicks = 0;                 // schnelle Klickserie
+  uint32_t letzterKlick = 0;
 };
 
 static void seitenTaste(Button& taste, SeitenTaste& st, int schritt, bool heller, bool gesperrt) {
@@ -778,7 +839,13 @@ static void seitenTaste(Button& taste, SeitenTaste& st, int schritt, bool heller
     st.naechstesDimmen = now + DIMM_INTERVALL_MS;
   }
   if (taste.wasReleased()) {
-    if (!st.gedimmt && !gesperrt) seiteWechseln(schritt);
+    if (!st.gedimmt && !gesperrt) {
+      seiteWechseln(schritt);
+      // 5 schnelle Klicks hintereinander → alle Smileys nacheinander zeigen
+      st.klicks = (now - st.letzterKlick < SERIEN_KLICK_MS) ? st.klicks + 1 : 1;
+      st.letzterKlick = now;
+      if (st.klicks >= 5) { st.klicks = 0; starteSmileyDemo(); }
+    }
     st.gedimmt = false;
   }
 }
@@ -883,7 +950,232 @@ void drawPage() {
     case SEITE_WETTER:   drawWetter(force); break;
     case SEITE_VERLAUF:  if (force) drawHistory(); break;
     case SEITE_DIAGNOSE: drawDiagnose(); break;
+    case SEITE_SMILEY:   if (force) drawSmiley(); break;
   }
+}
+
+// =============================================================================
+// Gute-Laune-Smiley (morgens zwischendurch), animiert, Stil nach Außentemperatur
+// =============================================================================
+#define SM_CX 160
+#define SM_CY 92
+#define SM_R  72
+#define SM_GELB   0xFEA0
+#define SM_RAND   0xFC60
+#define SM_WANGE  0xFB2C
+#define SM_ZUNGE  0xF8B2
+#define SM_MUETZE 0xD8A7
+#define SM_KALT_C   0.0f              // bis hierhin: Mütze und Schnee
+#define SM_WARM_C   25.0f             // ab hier: Sonnenbrille
+#define SM_FRAME_MS 70
+#define SM_FLOCKEN  16
+
+enum SmileyStil { SM_NORMAL, SM_KALT, SM_HEISS };
+SmileyStil smStil = SM_NORMAL;
+int8_t     smStilTest = -1;            // per Topic "kalt"/"heiss"/"normal" erzwingen (ein Mal)
+uint32_t   smStart = 0, smFrame = 0;
+float      smPhase = 0;                // Drehung der Strahlen
+int16_t    flX[SM_FLOCKEN], flY[SM_FLOCKEN];
+uint8_t    smAugen = 0;                // 0 offen, 1 beide zu, 2 rechts zu
+
+static bool aussenTemp(float& t) {
+  if (frisch(w.tHeiz, HEIZ_MAX_AGE_MS)) { t = w.tAussen; return true; }
+  if (frisch(wet.t, WETTER_MAX_AGE_MS)) { t = wet.temp; return true; }
+  return false;
+}
+
+static SmileyStil smileyStil() {
+  if (smStilTest >= 0) { SmileyStil s = (SmileyStil)smStilTest; smStilTest = -1; return s; }
+  float t;
+  if (!aussenTemp(t)) return SM_NORMAL;
+  if (t <= SM_KALT_C) return SM_KALT;
+  if (t >= SM_WARM_C) return SM_HEISS;
+  return SM_NORMAL;
+}
+
+static const char* smileySpruch() {
+  struct tm t;
+  const bool zeit = getLocalTime(&t, 0);
+  if (smileyNr % 2 == 1) {
+    if (smStil == SM_KALT)  return smileyNr % 4 == 1 ? "Brrr! Warm anziehen!" : "Muetze auf, es ist kalt!";
+    if (smStil == SM_HEISS) return smileyNr % 4 == 1 ? "Heute wird's heiss!" : "Sonnencreme nicht vergessen!";
+  }
+  // Sonne angesagt? (WMO-Code 0..2 = klar bis leicht bewölkt)
+  if (smileyNr % 3 == 0 && frisch(wet.t, WETTER_MAX_AGE_MS) && wet.nTage > 0 && wet.d[0].code <= 2) {
+    return "Heute scheint die Sonne!";
+  }
+  if (zeit && smileyNr % 2 == 0) {
+    switch (t.tm_wday) {
+      case 1: return "Guter Start in die Woche!";
+      case 3: return "Bergfest!";
+      case 4: return "Fast geschafft!";
+      case 5: return "Bald ist Wochenende!";
+      case 6: case 0: return "Schoenes Wochenende!";
+    }
+  }
+  static const char* const sprueche[] = {
+    "Heute wird ein guter Tag!", "Du schaffst das!", "Laecheln steckt an!",
+    "Kaffee schon gehabt?", "Du bist super!", "Hab einen tollen Tag!"
+  };
+  return sprueche[smileyNr % (sizeof(sprueche) / sizeof(sprueche[0]))];
+}
+
+// Sonnenstrahlen im Winkel "phase" in Farbe c (navy = löschen)
+static void smStrahlen(float phase, uint16_t c) {
+  const int innen = SM_R + 6, aussen = SM_R + (smStil == SM_HEISS ? 20 : 16);
+  for (int i = 0; i < 12; i++) {
+    const float a = i * PI / 6 + phase;
+    for (int d = -1; d <= 1; d++) {
+      const float b = a + d * 0.014f;
+      int y1 = SM_CY + sinf(b) * innen, y2 = SM_CY + sinf(b) * aussen;
+      M5.Lcd.drawLine(SM_CX + cosf(b) * innen, y1, SM_CX + cosf(b) * aussen, y2, c);
+    }
+  }
+}
+
+static void smAuge(int x, bool zu) {
+  const int y = SM_CY - 22;
+  M5.Lcd.fillRect(x - 12, y - 15, 25, 31, SM_GELB);          // Augenbereich löschen
+  if (zu) {
+    for (int dx = -10; dx <= 10; dx++)                          // geschlossen: fröhlicher Bogen
+      M5.Lcd.fillCircle(x + dx, y + 4 - (100 - dx * dx) / 12, 2, TFT_BLACK);
+  } else {
+    M5.Lcd.fillEllipse(x, y, 8, 13, TFT_BLACK);
+    M5.Lcd.fillCircle(x + 3, y - 5, 3, TFT_WHITE);
+  }
+}
+
+static void smAugenZeichnen(uint8_t zustand) {
+  if (smStil == SM_HEISS) return;                               // Sonnenbrille: Augen nicht sichtbar
+  smAuge(SM_CX - 26, zustand == 1);
+  smAuge(SM_CX + 26, zustand != 0);
+}
+
+static void smMuetze() {
+  // Mützenkappe als oberes Kreissegment, Umschlag, Bommel
+  const int oben = SM_CY - SM_R - 4, unten = SM_CY - 50;
+  for (int y = oben; y <= unten; y++) {
+    const int dy = y - SM_CY;
+    const int hw = (int)sqrtf((float)(SM_R + 4) * (SM_R + 4) - dy * dy);
+    M5.Lcd.drawFastHLine(SM_CX - hw, y, 2 * hw + 1, SM_MUETZE);
+  }
+  for (int x = SM_CX - 50; x <= SM_CX + 50; x += 14)            // Strickmuster
+    M5.Lcd.drawFastVLine(x, oben + 10, unten - oben - 10, 0xB000);
+  M5.Lcd.fillRoundRect(SM_CX - 64, SM_CY - 52, 128, 14, 6, TFT_WHITE);
+  M5.Lcd.fillCircle(SM_CX, oben - 6, 10, TFT_WHITE);
+}
+
+static void smBrille() {
+  const int y = SM_CY - 34;
+  M5.Lcd.fillRoundRect(SM_CX - 50, y, 40, 26, 8, TFT_BLACK);
+  M5.Lcd.fillRoundRect(SM_CX + 10, y, 40, 26, 8, TFT_BLACK);
+  M5.Lcd.fillRect(SM_CX - 10, y + 6, 20, 4, TFT_BLACK);        // Steg
+  M5.Lcd.drawLine(SM_CX - 50, y + 6, SM_CX - SM_R + 12, y - 2, TFT_BLACK);
+  M5.Lcd.drawLine(SM_CX + 50, y + 6, SM_CX + SM_R - 12, y - 2, TFT_BLACK);
+  M5.Lcd.fillRect(SM_CX - 42, y + 5, 10, 4, TFT_WHITE);        // Glanz
+  M5.Lcd.fillRect(SM_CX + 18, y + 5, 10, 4, TFT_WHITE);
+}
+
+// Schneeflocke nur außerhalb des Gesichts und oberhalb des Textes
+static bool flockeFrei(int x, int y) {
+  const int dx = x - SM_CX, dy = y - SM_CY;
+  return y > 2 && y < 184 && x > 2 && x < 317 && dx * dx + dy * dy > (SM_R + 18) * (SM_R + 18);
+}
+
+static void smFlocke(int x, int y, uint16_t c) {
+  if (!flockeFrei(x, y)) return;
+  M5.Lcd.drawFastHLine(x - 2, y, 5, c);
+  M5.Lcd.drawFastVLine(x, y - 2, 5, c);
+}
+
+void drawSmiley() {
+  smStil = smileyStil();
+  smStart = smFrame = millis();
+  smPhase = 0;
+  smAugen = 0;
+  M5.Lcd.fillScreen(TFT_NAVY);
+  if (smStil != SM_KALT) smStrahlen(smPhase, smStil == SM_HEISS ? SM_RAND : SM_GELB);
+  else for (int i = 0; i < SM_FLOCKEN; i++) { flX[i] = random(4, 316); flY[i] = random(4, 184); }
+  M5.Lcd.fillCircle(SM_CX, SM_CY, SM_R, SM_RAND);
+  M5.Lcd.fillCircle(SM_CX, SM_CY, SM_R - 4, SM_GELB);
+  // Lachender offener Mund: untere Kreishälfte, Zähne, Zunge
+  M5.Lcd.fillCircle(SM_CX, SM_CY + 10, 40, TFT_BLACK);
+  M5.Lcd.fillRect(SM_CX - 44, SM_CY - 34, 88, 44, SM_GELB);   // obere Hälfte wieder abdecken
+  M5.Lcd.fillRect(SM_CX - 38, SM_CY + 10, 76, 6, TFT_WHITE);  // Zähne
+  M5.Lcd.fillEllipse(SM_CX, SM_CY + 40, 20, 8, SM_ZUNGE);
+  M5.Lcd.fillCircle(SM_CX - 52, SM_CY + 12, 10, SM_WANGE);
+  M5.Lcd.fillCircle(SM_CX + 52, SM_CY + 12, 10, SM_WANGE);
+  if (smStil == SM_HEISS) smBrille(); else smAugenZeichnen(0);
+  if (smStil == SM_KALT) smMuetze();
+  // Text
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setTextColor(SM_GELB, TFT_NAVY);
+  M5.Lcd.drawCentreString("Guten Morgen!", 160, 190, 4);
+  M5.Lcd.setTextColor(TFT_WHITE, TFT_NAVY);
+  M5.Lcd.drawCentreString(smileySpruch(), 160, 220, 2);
+}
+
+// Aus loop() aufgerufen, solange der Smiley zu sehen ist
+void animSmiley() {
+  const uint32_t now = millis();
+  if (now - smFrame < SM_FRAME_MS) return;
+  smFrame = now;
+  const uint32_t t = now - smStart;
+
+  if (smStil == SM_KALT) {                                      // Schnee rieselt
+    for (int i = 0; i < SM_FLOCKEN; i++) {
+      smFlocke(flX[i], flY[i], TFT_NAVY);
+      flY[i] += 2 + (i % 3);
+      flX[i] += (i % 2) ? 1 : -1;
+      if (flY[i] > 184) { flY[i] = 4; flX[i] = random(4, 316); }
+      smFlocke(flX[i], flY[i], TFT_WHITE);
+    }
+  } else {                                                      // Strahlen drehen sich
+    smStrahlen(smPhase, TFT_NAVY);
+    smPhase += 0.04f;
+    smStrahlen(smPhase, smStil == SM_HEISS ? SM_RAND : SM_GELB);
+  }
+
+  // Blinzeln bei 1,2 s, Zwinkern (rechts) bei 3,4 s
+  uint8_t soll = 0;
+  if (t >= 1200 && t < 1350) soll = 1;
+  else if (t >= 3400 && t < 3900) soll = 2;
+  if (soll != smAugen) { smAugen = soll; smAugenZeichnen(soll); }
+}
+
+// Demo: alle Stile nacheinander (5 schnelle Klicks auf A oder C)
+static void zeigeDemoSchritt() {
+  static const SmileyStil folge[] = { SM_NORMAL, SM_KALT, SM_HEISS };
+  smStilTest = folge[smileyDemo - 1];
+  page = SEITE_SMILEY;
+  smileyNr++;
+  forceRedraw = true;
+}
+
+void starteSmileyDemo() {
+  smileyNach = SEITE_SOLAR;
+  smileyDemo = 1;
+  lastPageSwitch = millis();
+  zeigeDemoSchritt();
+}
+
+// nach Ablauf eines Smileys: nächster Demo-Schritt? (false = Demo vorbei / keine Demo)
+bool smileyDemoWeiter() {
+  if (smileyDemo == 0) return false;
+  if (smileyDemo >= 3) { smileyDemo = 0; return false; }
+  smileyDemo++;
+  zeigeDemoSchritt();
+  return true;
+}
+
+// Befehl über MQTT: leer/beliebig = Stil nach Temperatur, "kalt"/"heiss"/"normal" = Stil erzwingen
+void smileyBefehl(const byte* p, unsigned int len) {
+  char m[8] = {0};
+  memcpy(m, p, len < sizeof(m) - 1 ? len : sizeof(m) - 1);
+  if      (!strcmp(m, "kalt"))   smStilTest = SM_KALT;
+  else if (!strcmp(m, "heiss"))  smStilTest = SM_HEISS;
+  else if (!strcmp(m, "normal")) smStilTest = SM_NORMAL;
+  zeigeSmileyJetzt();
 }
 
 void drawFieldShadow(int x, int y, int w, int h, int radius, uint16_t shadowColor) {
