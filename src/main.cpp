@@ -207,10 +207,15 @@ uint32_t updateTimeOld = 0;
 char     lastFault[64] = "";
 uint32_t lastFaultMillis = 0;
 
-// Verbindungsstatistik des Displays selbst
-uint32_t wifiAbbrueche = 0, mqttAbbrueche = 0, mqttStill = 0;
-volatile uint8_t wifiGrund = 0;        // letzter WLAN-Trenngrund (wifi_err_reason_t)
-int      mqttGrund = 0;                // PubSubClient-Status beim letzten Abbruch
+// Verbindungsstatistik des Displays selbst. RTC_NOINIT: übersteht Neustarts
+// (Watchdog, Absturz, Software), wird nur beim Einschalten gelöscht.
+#define RTC_MAGIC 0x4D354431UL
+RTC_NOINIT_ATTR uint32_t rtcMagic;
+RTC_NOINIT_ATTR uint32_t wifiAbbrueche, mqttAbbrueche, mqttStill, neustarts;
+RTC_NOINIT_ATTR uint8_t  eigenerGrund;  // 'W' = Neustart wegen WLAN, sonst 0
+RTC_NOINIT_ATTR uint8_t  wifiGrund;     // letzter WLAN-Trenngrund (wifi_err_reason_t)
+RTC_NOINIT_ATTR int32_t  mqttGrund;     // PubSubClient-Status beim letzten Abbruch
+char     rstText[8] = "";              // Grund des letzten Neustarts
 uint32_t tLetzteNachricht = 0;         // letzte empfangene MQTT-Nachricht
 bool     faultActive = false;
 
@@ -314,6 +319,31 @@ void setup() {
   M5.Lcd.setBrightness(BRIGHT_NORMAL);
   M5.Lcd.fillScreen(TFT_NAVY);
 
+  const esp_reset_reason_t rr = esp_reset_reason();
+  if (rtcMagic != RTC_MAGIC || rr == ESP_RST_POWERON) {
+    rtcMagic = RTC_MAGIC;
+    wifiAbbrueche = mqttAbbrueche = mqttStill = neustarts = 0;
+    eigenerGrund = wifiGrund = 0;
+    mqttGrund = 0;
+  } else {
+    neustarts++;
+  }
+  const char* rs = "?";
+  switch (rr) {
+    case ESP_RST_POWERON:  rs = "Strom"; break;
+    case ESP_RST_EXT:      rs = "Ext";   break;
+    case ESP_RST_SW:       rs = eigenerGrund == 'W' ? "WLAN" : eigenerGrund == 'O' ? "OTA" : "SW"; break;
+    case ESP_RST_PANIC:    rs = "Panic"; break;
+    case ESP_RST_INT_WDT:  rs = "IntWDT"; break;
+    case ESP_RST_TASK_WDT: rs = "TaskWDT"; break;
+    case ESP_RST_WDT:      rs = "WDT";   break;
+    case ESP_RST_BROWNOUT: rs = "Spann."; break;
+    default: break;
+  }
+  strncpy(rstText, rs, sizeof(rstText) - 1);
+  eigenerGrund = 0;
+  DEBUG_PRINTF("Neustartgrund: %s (%d), Neustarts: %lu\n", rstText, (int)rr, (unsigned long)neustarts);
+
   esp_task_wdt_init(WATCHDOG_TIMEOUT_S, true);
   esp_task_wdt_add(NULL);
 
@@ -365,6 +395,7 @@ void handleOta() {
       if (gesamt) M5.Lcd.fillRect(42, 162, (int)(236UL * fertig / gesamt), 16, TFT_GREEN);
     });
     ArduinoOTA.onEnd([]() {
+      eigenerGrund = 'O';
       otaStatus("Update fertig", "Neustart ...", TFT_GREEN);
     });
     ArduinoOTA.onError([](ota_error_t fehler) {
@@ -449,6 +480,7 @@ void handleWifi() {
   }
   if (now - offlineSince >= WIFI_MAX_OFFLINE_MS) {
     DEBUG_PRINT(F("WiFi zu lange weg, Neustart\n"));
+    eigenerGrund = 'W';
     ESP.restart();
   }
 }
@@ -511,10 +543,10 @@ void handleMqtt() {
     char buf[220];
     snprintf(buf, sizeof(buf),
              "{\"rssi\":%d,\"bssid\":\"%s\",\"kanal\":%d,\"uptime\":%lu,\"wifiAbbr\":%lu,\"wifiGrund\":%u,"
-             "\"mqttAbbr\":%lu,\"mqttGrund\":%d,\"mqttStill\":%lu,\"heap\":%u}",
+             "\"mqttAbbr\":%lu,\"mqttGrund\":%d,\"mqttStill\":%lu,\"neustarts\":%lu,\"rst\":\"%s\",\"heap\":%u}",
              (int)WiFi.RSSI(), WiFi.BSSIDstr().c_str(), (int)WiFi.channel(), (unsigned long)(millis() / 1000),
-             (unsigned long)wifiAbbrueche, (unsigned)wifiGrund, (unsigned long)mqttAbbrueche, mqttGrund,
-             (unsigned long)mqttStill, (unsigned)ESP.getFreeHeap());
+             (unsigned long)wifiAbbrueche, (unsigned)wifiGrund, (unsigned long)mqttAbbrueche, (int)mqttGrund,
+             (unsigned long)mqttStill, (unsigned long)neustarts, rstText, (unsigned)ESP.getFreeHeap());
     mqttClient.publish(T_DIAG, buf, true);
   }
 }
@@ -1546,10 +1578,10 @@ void drawDiagnose() {
   snprintf(buf, sizeof(buf), "%d dBm, MQTT %s, %s", (int)WiFi.RSSI(),
            mqttClient.connected() ? "ok" : "weg", d1);
   diagZeile(y, "Display", buf, mqttClient.connected() ? TFT_WHITE : TFT_RED); y += 17;
-  snprintf(buf, sizeof(buf), "WLAN %lu (G%u), MQTT %lu/%lu, K%d",
+  snprintf(buf, sizeof(buf), "W%lu(%u) M%lu/%lu R%lu:%s",
            (unsigned long)wifiAbbrueche, (unsigned)wifiGrund, (unsigned long)mqttAbbrueche,
-           (unsigned long)mqttStill, (int)WiFi.channel());
-  diagZeile(y, "  Abbrueche", buf, (wifiAbbrueche || mqttAbbrueche) ? TFT_ORANGE : TFT_WHITE); y += 17;
+           (unsigned long)mqttStill, (unsigned long)neustarts, rstText);
+  diagZeile(y, "  Abbrueche", buf, (wifiAbbrueche || mqttAbbrueche || neustarts) ? TFT_ORANGE : TFT_WHITE); y += 17;
 
   // Letzte Störung
   if (lastFaultMillis) {
