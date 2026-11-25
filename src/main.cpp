@@ -477,8 +477,8 @@ void initWifi() {
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
   WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) {
-    wifiGrund = info.disconnected.reason;
-  }, SYSTEM_EVENT_STA_DISCONNECTED);
+    wifiGrund = info.wifi_sta_disconnected.reason;
+  }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   DEBUG_PRINT(F("WiFi verbinden...\n"));
 }
