@@ -60,6 +60,8 @@
 #define MQTT_BACKOFF_MIN     1000
 #define MQTT_BACKOFF_MAX     30000
 #define MQTT_PACKET_SIZE     2048      // Venus-JSON ist ca. 1 KB
+#define MQTT_STILL_MS        30000     // so lange keine Nachricht trotz "verbunden" -> neu verbinden
+#define DIAG_PUBLISH_MS      60000     // eigene Verbindungswerte an ioBroker melden
 #define LONG_PRESS_MS        3000      // so lange A + C halten: Display dimmen
 #define DIAG_PRESS_MS        1500      // so lange B halten: Verlauf/Diagnose freigeben
 #define KLICK_MAX_MS         500       // kürzer = Klick, länger gehalten = Lampe dimmen
@@ -99,6 +101,7 @@
 #define T_VENUS     "Venus-control"
 #define T_SOLL      "Ven_Neu/powerNeu"
 #define T_ONLINE    "M5Display/online"
+#define T_DIAG      "M5Display/diag"                      // JSON: RSSI, AP, Abbrueche, Gruende
 #define T_HEIZUNG   "oeg_kmsd/state"                      // Heizungsregelung OEG KMS-D (JSON, ca. alle 10 s)
 #define T_BR_ZEIT   "Heizung/Brenner_Laufzeit_heute"      // vom ioBroker-Skript gespiegelt [h]
 #define T_BR_STARTS "Heizung/Brenner_Starts_heute"
@@ -203,6 +206,12 @@ uint32_t feedbackUntil = 0;
 uint32_t updateTimeOld = 0;
 char     lastFault[64] = "";
 uint32_t lastFaultMillis = 0;
+
+// Verbindungsstatistik des Displays selbst
+uint32_t wifiAbbrueche = 0, mqttAbbrueche = 0, mqttStill = 0;
+volatile uint8_t wifiGrund = 0;        // letzter WLAN-Trenngrund (wifi_err_reason_t)
+int      mqttGrund = 0;                // PubSubClient-Status beim letzten Abbruch
+uint32_t tLetzteNachricht = 0;         // letzte empfangene MQTT-Nachricht
 bool     faultActive = false;
 
 // Function prototypes
@@ -408,6 +417,9 @@ void initWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
+  WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) {
+    wifiGrund = info.disconnected.reason;
+  }, SYSTEM_EVENT_STA_DISCONNECTED);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   DEBUG_PRINT(F("WiFi verbinden...\n"));
 }
@@ -425,7 +437,10 @@ void handleWifi() {
     offlineSince = 0;
     return;
   }
-  if (offlineSince == 0) { offlineSince = now; lastTry = now; }
+  if (offlineSince == 0) {
+    offlineSince = now; lastTry = now;
+    if (now > 20000) wifiAbbrueche++;                      // nicht beim Start zählen
+  }
   if (now - lastTry >= WIFI_RETRY_MS) {
     lastTry = now;
     DEBUG_PRINT(F("WiFi neuer Versuch\n"));
@@ -442,9 +457,29 @@ void handleMqtt() {
   static uint32_t lastTry = 0;
   static uint32_t backoff = MQTT_BACKOFF_MIN;
 
-  if (WiFi.status() != WL_CONNECTED) return;
+  static bool warVerbunden = false;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    if (warVerbunden) { warVerbunden = false; mqttAbbrueche++; mqttGrund = -3; }   // WLAN weg
+    return;
+  }
+
+  // Halboffene Verbindung: Client meint "verbunden", es kommt aber nichts mehr an
+  // (Bridge sendet mehrmals pro Sekunde) -> Socket schließen und neu verbinden
+  if (mqttClient.connected() && millis() - tLetzteNachricht > MQTT_STILL_MS) {
+    DEBUG_PRINT(F("MQTT still, neu verbinden\n"));
+    mqttStill++;
+    mqttClient.disconnect();
+    espClient.stop();
+  }
 
   if (!mqttClient.connected()) {
+    if (warVerbunden) {
+      warVerbunden = false;
+      mqttAbbrueche++;
+      mqttGrund = mqttClient.state();
+      DEBUG_PRINTF("MQTT getrennt rc=%d\n", mqttGrund);
+    }
     if (lastTry != 0 && millis() - lastTry < backoff) return;   // kein delay() mehr
     lastTry = millis();
     String clientId = "M5Stack-" + WiFi.macAddress();
@@ -458,6 +493,8 @@ void handleMqtt() {
       };
       for (auto t : topics) mqttClient.subscribe(t);
       backoff = MQTT_BACKOFF_MIN;
+      warVerbunden = true;
+      tLetzteNachricht = millis();
       DEBUG_PRINT(F("MQTT verbunden\n"));
     } else {
       DEBUG_PRINTF("MQTT Fehler rc=%d, naechster Versuch in %lu ms\n", mqttClient.state(), (unsigned long)backoff);
@@ -466,6 +503,20 @@ void handleMqtt() {
     return;
   }
   mqttClient.loop();
+
+  // Eigene Verbindungswerte melden (retained), damit ioBroker Abbrüche aufzeichnen kann
+  static uint32_t tDiag = 0;
+  if (mqttClient.connected() && (tDiag == 0 || millis() - tDiag >= DIAG_PUBLISH_MS)) {
+    tDiag = millis();
+    char buf[220];
+    snprintf(buf, sizeof(buf),
+             "{\"rssi\":%d,\"bssid\":\"%s\",\"kanal\":%d,\"uptime\":%lu,\"wifiAbbr\":%lu,\"wifiGrund\":%u,"
+             "\"mqttAbbr\":%lu,\"mqttGrund\":%d,\"mqttStill\":%lu,\"heap\":%u}",
+             (int)WiFi.RSSI(), WiFi.BSSIDstr().c_str(), (int)WiFi.channel(), (unsigned long)(millis() / 1000),
+             (unsigned long)wifiAbbrueche, (unsigned)wifiGrund, (unsigned long)mqttAbbrueche, mqttGrund,
+             (unsigned long)mqttStill, (unsigned)ESP.getFreeHeap());
+    mqttClient.publish(T_DIAG, buf, true);
+  }
 }
 
 static bool parseZahl(const char* s, float& out) {
@@ -557,6 +608,7 @@ static void verarbeiteWetter(byte* payload, unsigned int length) {
 }
 
 void callbackMqttReceive(char* topic, byte* payload, unsigned int length) {
+  tLetzteNachricht = millis();
   if (strcmp(topic, T_WETTER) == 0) {
     verarbeiteWetter(payload, length);
     return;
@@ -1494,8 +1546,10 @@ void drawDiagnose() {
   snprintf(buf, sizeof(buf), "%d dBm, MQTT %s, %s", (int)WiFi.RSSI(),
            mqttClient.connected() ? "ok" : "weg", d1);
   diagZeile(y, "Display", buf, mqttClient.connected() ? TFT_WHITE : TFT_RED); y += 17;
-  snprintf(buf, sizeof(buf), "%s (%s.local)", WiFi.localIP().toString().c_str(), OTA_HOSTNAME);
-  diagZeile(y, "  IP / OTA", buf, TFT_WHITE); y += 17;
+  snprintf(buf, sizeof(buf), "WLAN %lu (G%u), MQTT %lu/%lu, K%d",
+           (unsigned long)wifiAbbrueche, (unsigned)wifiGrund, (unsigned long)mqttAbbrueche,
+           (unsigned long)mqttStill, (int)WiFi.channel());
+  diagZeile(y, "  Abbrueche", buf, (wifiAbbrueche || mqttAbbrueche) ? TFT_ORANGE : TFT_WHITE); y += 17;
 
   // Letzte Störung
   if (lastFaultMillis) {
