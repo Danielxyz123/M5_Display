@@ -216,6 +216,12 @@ RTC_NOINIT_ATTR uint8_t  eigenerGrund;  // 'W' = Neustart wegen WLAN, sonst 0
 RTC_NOINIT_ATTR uint8_t  wifiGrund;     // letzter WLAN-Trenngrund (wifi_err_reason_t)
 RTC_NOINIT_ATTR int32_t  mqttGrund;     // PubSubClient-Status beim letzten Abbruch
 char     rstText[8] = "";              // Grund des letzten Neustarts
+// Wo war das Programm zuletzt? (nach Absturz in diag als "ort"/"topic")
+RTC_NOINIT_ATTR uint8_t rtcOrt;
+RTC_NOINIT_ATTR char    rtcTopic[28];
+uint8_t  ortVorher = 0;                // Stand vor diesem Neustart
+char     topicVorher[28] = "";
+#define ORT(n) (rtcOrt = (n))
 uint32_t tLetzteNachricht = 0;         // letzte empfangene MQTT-Nachricht
 bool     faultActive = false;
 
@@ -325,9 +331,14 @@ void setup() {
     wifiAbbrueche = mqttAbbrueche = mqttStill = neustarts = 0;
     eigenerGrund = wifiGrund = 0;
     mqttGrund = 0;
+    rtcOrt = 0; rtcTopic[0] = '\0';
   } else {
     neustarts++;
   }
+  ortVorher = rtcOrt;
+  rtcTopic[sizeof(rtcTopic) - 1] = '\0';
+  strncpy(topicVorher, rtcTopic, sizeof(topicVorher) - 1);
+  rtcOrt = 0;
   const char* rs = "?";
   switch (rr) {
     case ESP_RST_POWERON:  rs = "Strom"; break;
@@ -355,7 +366,7 @@ void setup() {
   mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
   mqttClient.setBufferSize(MQTT_PACKET_SIZE);
   mqttClient.setKeepAlive(30);
-  mqttClient.setSocketTimeout(5);
+  mqttClient.setSocketTimeout(10);                          // Lesetimeout je Byte; zu kurz → Paket reißt ab
   mqttClient.setCallback(callbackMqttReceive);
 
   forceRedraw = true;
@@ -415,13 +426,12 @@ void handleOta() {
 
 void loop() {
   esp_task_wdt_reset();
-  handleOta();
-  M5.update();
-
+  ORT(1); handleOta();
+  ORT(2); M5.update();
   handleButtons();
-  handleWifi();
-  handleMqtt();
-  handleTestMode();
+  ORT(3); handleWifi();
+  ORT(4); handleMqtt();
+  ORT(6); handleTestMode();
   sampleHistory();
   pruefeStoerung();
   handleAutoWechsel();
@@ -436,8 +446,9 @@ void loop() {
 
   if (millis() - updateTimeOld > UPDATE_INTERVAL) {
     updateTimeOld = millis();
-    drawPage();
+    ORT(7); drawPage();
   }
+  ORT(0);
   yield();
 }
 
@@ -535,18 +546,21 @@ void handleMqtt() {
     return;
   }
   mqttClient.loop();
+  ORT(4);
 
   // Eigene Verbindungswerte melden (retained), damit ioBroker Abbrüche aufzeichnen kann
   static uint32_t tDiag = 0;
   if (mqttClient.connected() && (tDiag == 0 || millis() - tDiag >= DIAG_PUBLISH_MS)) {
     tDiag = millis();
-    char buf[220];
+    char buf[320];
     snprintf(buf, sizeof(buf),
              "{\"rssi\":%d,\"bssid\":\"%s\",\"kanal\":%d,\"uptime\":%lu,\"wifiAbbr\":%lu,\"wifiGrund\":%u,"
-             "\"mqttAbbr\":%lu,\"mqttGrund\":%d,\"mqttStill\":%lu,\"neustarts\":%lu,\"rst\":\"%s\",\"heap\":%u}",
+             "\"mqttAbbr\":%lu,\"mqttGrund\":%d,\"mqttStill\":%lu,\"neustarts\":%lu,\"rst\":\"%s\","
+             "\"ort\":%u,\"topic\":\"%s\",\"heap\":%u,\"heapMin\":%u}",
              (int)WiFi.RSSI(), WiFi.BSSIDstr().c_str(), (int)WiFi.channel(), (unsigned long)(millis() / 1000),
              (unsigned long)wifiAbbrueche, (unsigned)wifiGrund, (unsigned long)mqttAbbrueche, (int)mqttGrund,
-             (unsigned long)mqttStill, (unsigned long)neustarts, rstText, (unsigned)ESP.getFreeHeap());
+             (unsigned long)mqttStill, (unsigned long)neustarts, rstText, (unsigned)ortVorher, topicVorher,
+             (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
     mqttClient.publish(T_DIAG, buf, true);
   }
 }
@@ -641,6 +655,9 @@ static void verarbeiteWetter(byte* payload, unsigned int length) {
 
 void callbackMqttReceive(char* topic, byte* payload, unsigned int length) {
   tLetzteNachricht = millis();
+  ORT(5);
+  strncpy(rtcTopic, topic, sizeof(rtcTopic) - 1);
+  rtcTopic[sizeof(rtcTopic) - 1] = '\0';
   if (strcmp(topic, T_WETTER) == 0) {
     verarbeiteWetter(payload, length);
     return;
