@@ -48,7 +48,7 @@
 #define BRIDGE_MAX_AGE_MS    10000     // Lebenszeichen der Bridge
 #define VENUS_MAX_AGE_MS     15000     // Venus-Controller (JSON, Lifebit)
 #define SOLL_MAX_AGE_MS      10000     // Regelskript sendet jede Sekunde
-#define AKKU_MAX_AGE_MS      60000     // Shelly-Spiegel sendet nur bei Änderung
+#define AKKU_MAX_AGE_MS      60000     // Akkuleistung kommt jede Sekunde mit dem Venus-JSON
 #define SLOW_MAX_AGE_MS      1800000UL // Ladestand/Autarkie ändern sich selten
 #define PV_HEUTE_MAX_AGE_MS  600000    // Tagesertrag kommt alle 30 s
 #define STANDBY_W            15        // darunter gilt der Akku als ruhend

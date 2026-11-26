@@ -254,6 +254,12 @@ static void verarbeiteVenus(byte* payload, unsigned int length) {
   w.venusAc       = atoi(doc["AC power bat"] | "0");
   w.venusUptime   = strtoul(doc["Uptime"] | "0", nullptr, 10);
   w.tVenus        = millis();
+  // Akkuleistung direkt aus dem Venus-JSON (kommt jede Sekunde; der MQTT-Spiegel
+  // VenusData/PowerShelly sendet nur bei Änderung). Vorzeichen wie Shelly: + Laden, - Entladen.
+  if (!testMode && w.venusModbusOk && !doc["AC power bat"].isNull()) {
+    w.akku  = -(float)w.venusAc;
+    w.tAkku = w.tVenus;
+  }
 }
 
 static void verarbeiteHeizung(byte* payload, unsigned int length) {
