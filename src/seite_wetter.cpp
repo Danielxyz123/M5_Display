@@ -175,7 +175,17 @@ void drawWetter(bool force) {
     M5.Lcd.setTextColor(aktuell ? TFT_LIGHTGREY : TFT_DARKGREY);
     M5.Lcd.drawCentreString(wetterText(wet.code), 145, 52, 2);
   }
-  if (aktuell && wet.glStufe > 0) {                        // Glätte-Warnung statt Ort/Wind
+  if (aktuell && wet.warnStufe > 0) {                      // DWD-Wetterwarnung hat Vorrang vor Glätte
+    const uint16_t hg = wet.warnStufe >= 4 ? TFT_MAGENTA : wet.warnStufe == 3 ? TFT_RED : W_ORANGE;
+    M5.Lcd.fillRoundRect(214, 9, 96, 64, 6, hg);
+    M5.Lcd.drawRoundRect(215, 10, 94, 62, 5, TFT_WHITE);
+    M5.Lcd.setTextColor(wet.warnStufe >= 3 ? TFT_WHITE : TFT_BLACK);
+    M5.Lcd.drawCentreString("WARNUNG!", 262, 11, 2);
+    const int fArt = M5.Lcd.textWidth(wet.warnArt, 2) <= 92 ? 2 : 1;
+    M5.Lcd.drawCentreString(wet.warnArt, 262, fArt == 2 ? 29 : 32, fArt);
+    M5.Lcd.drawCentreString("DWD", 262, 47, 1);
+    M5.Lcd.drawCentreString(wet.warnZeit, 262, 59, 1);
+  } else if (aktuell && wet.glStufe > 0) {                 // Glätte-Warnung statt Ort/Wind
     const uint16_t hg = wet.glStufe >= 2 ? TFT_RED : W_ORANGE;
     M5.Lcd.fillRoundRect(214, 9, 96, 64, 6, hg);
     if (wet.glStufe >= 3) M5.Lcd.drawRoundRect(215, 10, 94, 62, 5, TFT_WHITE);

@@ -51,6 +51,8 @@ struct Wetter {
   WetterTag    d[4];
   int          glStufe = 0;            // 0 keine, 1 möglich, 2 wahrscheinlich/DWD, 3 DWD-Unwetter
   char         glArt[20] = "", glZusatz[16] = "", glZeit[12] = "";
+  int          warnStufe = 0;          // DWD-Wetterwarnung: 0 keine, 1 gelb, 2 orange, 3 rot, 4 violett
+  char         warnArt[20] = "", warnZeit[20] = "";
 };
 
 extern Werte  w;

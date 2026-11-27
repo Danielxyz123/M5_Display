@@ -314,6 +314,17 @@ static void verarbeiteWetter(byte* payload, unsigned int length) {
   strncpy(wet.glArt,    g.isNull() ? "" : (g[1] | ""), sizeof(wet.glArt) - 1);
   strncpy(wet.glZusatz, g.isNull() ? "" : (g[2] | ""), sizeof(wet.glZusatz) - 1);
   strncpy(wet.glZeit,   g.isNull() ? "" : (g[3] | ""), sizeof(wet.glZeit) - 1);
+  // DWD-Wetterwarnung (Hitze, Sturm, Gewitter, Regen, Hagel, strenger Frost); neue Warnung → einmal Wetterseite zeigen
+  JsonArrayConst wa = doc["w"];
+  const int warnVorher = wet.warnStufe;
+  wet.warnStufe = wa.isNull() ? 0 : (wa[0] | 0);
+  strncpy(wet.warnArt,  wa.isNull() ? "" : (wa[1] | ""), sizeof(wet.warnArt) - 1);
+  strncpy(wet.warnZeit, wa.isNull() ? "" : (wa[2] | ""), sizeof(wet.warnZeit) - 1);
+  if (wet.warnStufe > 0 && warnVorher == 0 && !faultActive && page != SEITE_SMILEY) {
+    page = SEITE_WETTER;
+    lastPageSwitch = millis();
+    forceRedraw = true;
+  }
   wet.t = millis();
   wetterNeu = true;
 }

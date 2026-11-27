@@ -47,6 +47,7 @@ void handleTestMode();
 
 // ---- seiten -----------------------------------------------------------------
 void handleAutoWechsel();
+bool autoAngehalten();                 // Störung oder Wetterwarnung → kein automatischer Wechsel
 void seiteWechseln(int schritt);
 void drawPage();
 void drawOverview(bool force);

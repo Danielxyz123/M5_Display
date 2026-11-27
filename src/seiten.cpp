@@ -20,6 +20,7 @@ void handleAutoWechsel() {
     }
     return;
   }
+  if (autoAngehalten()) return;                           // Wetterwarnung oder Störung: nur noch per Taste
   if (tAlarm != 0 && now - tAlarm < ALARM_HALTEN_MS) return;   // neue Störung: Diagnose stehen lassen
   if (lastButton != 0 && now - lastButton < MANUELL_HALTEN_MS) return;
   if (M5.BtnA.isPressed() || M5.BtnB.isPressed() || M5.BtnC.isPressed() || feedbackUntil != 0) return;
@@ -41,6 +42,11 @@ void handleAutoWechsel() {
     lastPageSwitch = now;
     forceRedraw = true;
   }
+}
+
+// Automatischer Wechsel ruht, solange eine Störung oder eine DWD-Wetterwarnung vorliegt
+bool autoAngehalten() {
+  return faultActive || (frisch(wet.t, WETTER_MAX_AGE_MS) && wet.warnStufe > 0);
 }
 
 void seiteWechseln(int schritt) {
