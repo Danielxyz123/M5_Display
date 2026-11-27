@@ -55,7 +55,10 @@ void drawDiagnose() {
   snprintf(buf, sizeof(buf), "%s", w.venusReset[0] ? w.venusReset : "-");
   diagZeile(y, "  Neustart", buf, TFT_WHITE); y += 17;
   if (vz == VZ_STOERUNG) { diagZeile(y, "  Grund", grund, TFT_RED); }
-  else                   { diagZeile(y, "", "", TFT_WHITE); }
+  else if (frisch(mld.t, MELDUNGEN_MAX_AGE_MS)) {          // Meldungen aus dem ioBroker
+    snprintf(buf, sizeof(buf), "%d Stoer., %d Warn., %d Info", mld.stoerung, mld.warnung, mld.info);
+    diagZeile(y, "Meldungen", buf, mld.stoerung ? TFT_RED : mld.warnung ? TFT_ORANGE : mld.info ? TFT_CYAN : TFT_GREEN);
+  } else { diagZeile(y, "Meldungen", "-", TFT_DARKGREY); }
   y += 20;
 
   // Display selbst

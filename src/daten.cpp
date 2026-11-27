@@ -6,6 +6,7 @@
 Werte  w;
 Wetter wet;
 bool   wetterNeu = false;
+Meldungen mld;
 
 FieldState fsPV = {}, fsNetz = {}, fsAkku = {}, fsSoc = {}, fsAut = {};
 FieldState fsAussen = {}, fsVorlauf = {}, fsKessel = {}, fsWW = {}, fsBrenner = {};

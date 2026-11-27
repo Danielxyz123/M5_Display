@@ -191,7 +191,7 @@ void handleMqtt() {
       const char* topics[] = {
         T_GRID, T_GEN, T_HB, T_GVALID, T_INV, T_RSSI, T_MQC, T_MBERR, T_BUPTIME,
         T_AKKU, T_SOC, T_AUTARKIE, T_VENUS, T_SOLL, LAMP_TOPIC_ONOFF, T_PV_HEUTE,
-        T_HEIZUNG, T_BR_ZEIT, T_BR_STARTS, T_BR_24H, T_WOHNZIMMER, T_WETTER, T_SMILEY
+        T_HEIZUNG, T_BR_ZEIT, T_BR_STARTS, T_BR_24H, T_WOHNZIMMER, T_WETTER, T_SMILEY, T_MELDUNGEN
       };
       for (auto t : topics) mqttClient.subscribe(t);
       backoff = MQTT_BACKOFF_MIN;
@@ -334,6 +334,15 @@ void callbackMqttReceive(char* topic, byte* payload, unsigned int length) {
   ORT(5);
   strncpy(rtcTopic, topic, sizeof(rtcTopic) - 1);
   rtcTopic[sizeof(rtcTopic) - 1] = '\0';
+  if (strcmp(topic, T_MELDUNGEN) == 0) {               // Info-, Warn- und Störmeldungen (Anzahl)
+    StaticJsonDocument<256> doc;
+    if (!deserializeJson(doc, payload, length)) {
+      mld.stoerung = doc["s"] | 0; mld.warnung = doc["w"] | 0; mld.info = doc["i"] | 0;
+      strncpy(mld.text, doc["t"] | "", sizeof(mld.text) - 1);
+      mld.t = millis();
+    }
+    return;
+  }
   if (strcmp(topic, T_WETTER) == 0) {
     verarbeiteWetter(payload, length);
     return;

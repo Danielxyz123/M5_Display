@@ -44,9 +44,11 @@ void handleAutoWechsel() {
   }
 }
 
-// Automatischer Wechsel ruht, solange eine Störung oder eine DWD-Wetterwarnung vorliegt
+// Automatischer Wechsel ruht, solange eine Störung (eigene Erkennung oder Skript Meldungen)
+// oder eine DWD-Wetterwarnung vorliegt
 bool autoAngehalten() {
-  return faultActive || (frisch(wet.t, WETTER_MAX_AGE_MS) && wet.warnStufe > 0);
+  return faultActive || (frisch(wet.t, WETTER_MAX_AGE_MS) && wet.warnStufe > 0)
+      || (frisch(mld.t, MELDUNGEN_MAX_AGE_MS) && mld.stoerung > 0);
 }
 
 void seiteWechseln(int schritt) {

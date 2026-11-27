@@ -55,7 +55,14 @@ struct Wetter {
   char         warnArt[20] = "", warnZeit[20] = "";
 };
 
+struct Meldungen {                     // Zusammenfassung des ioBroker-Skripts Meldungen
+  uint32_t t = 0;                      // Empfangszeit
+  int      stoerung = 0, warnung = 0, info = 0;
+  char     text[64] = "";
+};
+
 extern Werte  w;
+extern Meldungen mld;
 extern Wetter wet;
 extern bool   wetterNeu;               // neue Wetterdaten → Seite neu zeichnen
 

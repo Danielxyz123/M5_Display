@@ -84,6 +84,8 @@
 #define T_WOHNZIMMER "sensor1/temperature"                 // Wohnzimmertemperatur [°C]
 #define WOHNZIMMER_MAX_AGE_MS 900000UL                     // älter als 15 min → grau
 #define T_WETTER    "Wetter/vorhersage"                   // Vorhersage Melle (JSON, ioBroker-Skript)
+#define T_MELDUNGEN "Meldungen/zusammenfassung"           // Skript Meldungen: {"s":Stoerungen,"w":Warnungen,"i":Infos,"t":Text}
+#define MELDUNGEN_MAX_AGE_MS 300000UL // kommt jede Minute; aelter als 5 min → nicht mehr beachten
 #define WETTER_MAX_AGE_MS    5400000UL // Abruf alle 30 min; älter als 90 min → grau
 
 // Heizung

@@ -18,7 +18,7 @@ M5Stack Core (ESP32, 320×240) im Wohnzimmer. Zeigt die wichtigsten Werte aus de
 Seiten wechseln alle 10 s (Solar → Heizung → Wetter → Uhr → Sonne & Mond).
 
 **Der automatische Wechsel ruht**, solange
-- eine **Störung** vorliegt (Zählerwert veraltet, Heizung sendet nicht, Venus-Störung; Rahmen blinkt rot, beim Auftreten Sprung zur Diagnose), oder
+- eine **Störung** vorliegt – eigene Erkennung (Zählerwert veraltet, Heizung sendet nicht, Venus-Störung; Rahmen blinkt rot, beim Auftreten Sprung zur Diagnose) oder eine Störmeldung des ioBroker-Skripts `Meldungen` (alle Geräte), oder
 - eine **DWD-Wetterwarnung** vorliegt: Hitze (ab gelb), Sturm/Orkan, Gewitter, Starkregen/Dauerregen, Hagel, strenger Frost (ab orange). Beim Auftreten einmal Sprung zur Wetterseite.
 
 Blättern mit den Tasten geht weiterhin. Sind Warnung und Störung vorbei, wechselt das Display wieder selbst.
@@ -45,6 +45,7 @@ Nach einem Tastendruck bleibt die Seite 1 min stehen, danach endet auch die Frei
 | `Heizung/*` | Skript `HeizungMqttDisplay` | Brennerwerte |
 | `sensor1/temperature` | Wohnzimmersensor | °C |
 | `Wetter/vorhersage` | Skript `WetterMqttDisplay` | JSON: `n` jetzt, `h` Stunden, `d` Tage, `g` Glätte, `w` DWD-Warnung |
+| `Meldungen/zusammenfassung` | Skript `Meldungen` | Anzahl Störungen/Warnungen/Infos und wichtigste Meldung; Diagnoseseite Zeile „Meldungen“ |
 | `lampe/wohnzimmer/*` | Display → ioBroker | Lampe an/aus, Helligkeit ±10 |
 | `M5Display/online`, `M5Display/diag` | Display | Lebenszeichen, Diagnose |
 
