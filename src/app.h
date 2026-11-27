@@ -8,9 +8,10 @@
 //   tasten.cpp    Tasten A/B/C
 //   seiten.cpp    automatischer Seitenwechsel, Blättern, Seite zeichnen
 //   zeichnen.cpp  Zeichenhilfen (Felder, Verläufe, Zahlen mit Komma/Grad)
-//   seite_*.cpp   je eine Seite: Solar, Heizung, Wetter, Uhr, Verlauf, Diagnose
+//   seite_*.cpp   je eine Seite: Solar, Heizung, Wetter, Uhr, Sonne & Mond, Verlauf, Diagnose
 //   smiley.cpp    Einblendungen steuern + Morgen-Smiley (animiert)
 //   mond.cpp      Gute-Nacht-Mond (animiert)
+//   astro.cpp     Sonne (Auf-/Untergang, Tageslänge) und Mond (Phase, Voll-/Neumond) berechnen
 //   stoerung.cpp  Störungen erkennen, Alarm (Rahmen blinkt, Sprung zur Diagnose)
 
 #include "config.h"
@@ -52,6 +53,7 @@ void drawOverview(bool force);
 void drawHeizung();
 void drawWetter(bool force);
 void drawUhr(bool force);
+void drawAstro(bool force);            // seite_astro.cpp
 void verlaufStart();
 void sampleHistory();
 void drawHistory();
@@ -79,6 +81,13 @@ bool smileyDemoWeiter();
 void smileyBefehl(const byte* p, unsigned int len);
 void drawMond(uint16_t nr);              // mond.cpp
 void animMond();
+
+// ---- astro ------------------------------------------------------------------
+struct SonneTag { time_t auf, unter, daemmUnter; int laengeMin; };   // Zeiten als Epoche, 0 = findet nicht statt
+struct MondInfo { float beleuchtung; bool zunehmend; const char* name; };
+SonneTag sonneBerechnen(time_t jetzt);  // für den lokalen Kalendertag von jetzt
+MondInfo mondBerechnen(time_t jetzt);
+time_t   naechsterMond(time_t ab, bool voll);
 
 // ---- stoerung ---------------------------------------------------------------
 extern char     lastFault[64];

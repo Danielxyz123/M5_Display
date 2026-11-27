@@ -97,11 +97,16 @@
 #define SEITE_HEIZUNG        1
 #define SEITE_WETTER         2
 #define SEITE_UHR            3
-#define SEITE_VERLAUF        4
-#define SEITE_DIAGNOSE       5
-#define SEITEN               6
-#define SEITE_SMILEY         6         // Smiley/Mond-Einblendung, nicht per Taste erreichbar
-#define AUTO_SEITEN          4         // Solar → Heizung → Wetter → Uhr wechseln automatisch
+#define SEITE_ASTRO          4         // Sonne & Mond
+#define SEITE_VERLAUF        5
+#define SEITE_DIAGNOSE       6
+#define SEITEN               7
+#define SEITE_SMILEY         7         // Smiley/Mond-Einblendung, nicht per Taste erreichbar
+#define AUTO_SEITEN          5         // Solar → Heizung → Wetter → Uhr → Sonne & Mond wechseln automatisch
+
+// Standort für Sonne und Mond (Melle, wie pvforecast im ioBroker)
+#define ORT_LAT              52.2033
+#define ORT_LON              8.3373
 #define AUTO_WECHSEL_MS      10000
 #define MANUELL_HALTEN_MS    60000     // manuell gewählte Seite so lange stehen lassen
 

@@ -72,7 +72,7 @@ void loop() {
     fsPV.text[0] = '\0';                                    // oberes Feld neu zeichnen erzwingen
     fsAussen.text[0] = '\0';
     wetterNeu = true;                                       // Wetterkopf neu zeichnen
-    if (page == SEITE_UHR) forceRedraw = true;
+    if (page == SEITE_UHR || page == SEITE_ASTRO) forceRedraw = true;
   }
 
   if (millis() - updateTimeOld > UPDATE_INTERVAL) {

@@ -4,7 +4,7 @@
 // Seiten: automatischer Wechsel, Blättern, Zeichnen der aktuellen Seite
 // =============================================================================
 
-// Automatischer Wechsel Solar → Heizung → Wetter → Uhr, dazwischen Smiley/Mond.
+// Automatischer Wechsel Solar → Heizung → Wetter → Uhr → Sonne & Mond, dazwischen Smiley/Mond.
 // Nach einem Tastendruck bleibt die Seite MANUELL_HALTEN_MS stehen; danach endet die Freigabe
 // von Verlauf/Diagnose und es geht zur Solarseite zurück.
 void handleAutoWechsel() {
@@ -69,6 +69,7 @@ void drawPage() {
     case SEITE_HEIZUNG:  drawHeizung(); break;
     case SEITE_WETTER:   drawWetter(force); break;
     case SEITE_UHR:      drawUhr(force); break;
+    case SEITE_ASTRO:    drawAstro(force); break;
     case SEITE_VERLAUF:  if (force) drawHistory(); break;
     case SEITE_DIAGNOSE: drawDiagnose(); break;
     case SEITE_SMILEY:   if (force) drawSmiley(); break;
